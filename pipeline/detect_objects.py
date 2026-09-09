@@ -16,7 +16,9 @@ into a running cross-frame detection list (same physical object seen again
 Detection only runs every --detect-every-sec seconds, not on every frame,
 and only keeps VisDrone class 3 (car) by default -- the other vehicle
 classes (van/truck/bus/motor) misfire far more often on this model, so
-they're off unless --classes overrides it.
+they're off unless --classes overrides it. That filter is applied to the
+raw candidates *before* NMS and cross-class dedup, so a class that is
+being discarded can never out-vote one that is being kept.
 
 Usage:
     python3 pipeline/detect_objects.py <video> <model.onnx> <data.json> <out.json>
@@ -42,8 +44,21 @@ VEHICLE_CLASSES = [3, 4, 5, 6, 7, 8, 9]  # all vehicle classes, usable via --cla
 DEFAULT_CLASSES = [3]  # car only
 
 
-def letterbox_tile(img, x0, y0, tile):
-    """Cuts a tile*tile window out of img at (x0,y0), zero-padding outside the image bounds."""
+def sane_fps(raw_fps, video_path):
+    """OpenCV reports 0 (and occasionally NaN/inf) for containers it cannot read
+    the rate from; `raw or 30.0` misses NaN, and a bad fps silently shifts every
+    sampled frame index. Kept in the same shape in extract_trajectory/render_preview."""
+    fps = float(raw_fps or 0.0)
+    if not math.isfinite(fps) or fps <= 0:
+        print(f"warning: unusable fps ({raw_fps!r}) from {video_path}, falling back to 30.0", file=sys.stderr)
+        return 30.0
+    return fps
+
+
+def crop_tile(img, x0, y0, tile):
+    """Cuts a tile*tile window out of img at (x0,y0), zero-padding outside the
+    image bounds. A plain crop + pad, not a letterbox: the model input is
+    already tile-sized, so nothing is resized and box coords stay 1:1."""
     h, w = img.shape[:2]
     out = np.zeros((tile, tile, 3), dtype=img.dtype)
     x1, y1 = min(x0 + tile, w), min(y0 + tile, h)
@@ -71,10 +86,15 @@ def run_tiled_inference(img_bgr, sess, tile=640, overlap=160, conf_thresh=0.25, 
     done = 0
     for y0 in ys:
         for x0 in xs:
-            tile_img = letterbox_tile(img_bgr, x0, y0, tile)
+            tile_img = crop_tile(img_bgr, x0, y0, tile)
             rgb = cv2.cvtColor(tile_img, cv2.COLOR_BGR2RGB).astype(np.float32) / 255.0
             chw = np.transpose(rgb, (2, 0, 1))[None, ...]
             out = sess.run(None, {input_name: chw})[0]  # [1, 14, 8400]
+            # check the layout once: a model with a different class count would
+            # otherwise silently mis-map every class id below
+            if done == 0 and out.shape[1] != 4 + len(VISDRONE_NAMES):
+                raise SystemExit(f"unexpected model output shape {out.shape}: expected "
+                                 f"{4 + len(VISDRONE_NAMES)} rows (4 box + {len(VISDRONE_NAMES)} class scores)")
             pred = out[0].T  # [8400, 14]: cx,cy,w,h, 10 class scores
             boxes_xywh = pred[:, :4]
             class_scores = pred[:, 4:]
@@ -83,14 +103,16 @@ def run_tiled_inference(img_bgr, sess, tile=640, overlap=160, conf_thresh=0.25, 
             keep = confs >= conf_thresh
             if keep.any():
                 bx = boxes_xywh[keep]
+                kept_confs = confs[keep]   # hoisted: these two were re-sliced on
+                kept_cls = cls_ids[keep]   # every iteration of the loop below
                 cx, cy, bw, bh = bx[:, 0], bx[:, 1], bx[:, 2], bx[:, 3]
                 # center-based (cx,cy,w,h) -> top-left + tile offset, still frame-local
                 x1 = cx - bw / 2 + x0
                 y1 = cy - bh / 2 + y0
                 for i in range(len(cx)):
                     all_boxes.append([float(x1[i]), float(y1[i]), float(bw[i]), float(bh[i])])
-                    all_scores.append(float(confs[keep][i]))
-                    all_classes.append(int(cls_ids[keep][i]))
+                    all_scores.append(float(kept_confs[i]))
+                    all_classes.append(int(kept_cls[i]))
             done += 1
             if log:
                 print(f"    tile {done}/{n_tiles} ({x0},{y0}) -> {int(keep.sum()) if keep.any() else 0} candidate(s)", file=sys.stderr)
@@ -141,11 +163,36 @@ def cross_class_dedup(boxes, scores, classes, keep_idx, iou_thresh=0.6):
     return accepted
 
 
+def postprocess_frame(boxes, scores, classes, keep_classes, iou_thresh=0.45):
+    """Whole per-frame candidate cleanup: drop everything outside keep_classes,
+    then per-class NMS, then the cross-class pass. Returns indices into the
+    original boxes/scores/classes lists.
+
+    The class filter has to run FIRST. Filtering afterwards let a confident
+    wrong guess (a "van" sitting on top of a car) win the cross-class dedup
+    and then get thrown away by the filter, losing the car entirely."""
+    idx = [i for i, c in enumerate(classes) if c in keep_classes]
+    if not idx:
+        return []
+    sub_boxes = [boxes[i] for i in idx]
+    sub_scores = [scores[i] for i in idx]
+    sub_classes = [classes[i] for i in idx]
+    keep = nms_per_class(sub_boxes, sub_scores, sub_classes, iou_thresh)
+    keep = cross_class_dedup(sub_boxes, sub_scores, sub_classes, keep)
+    return [idx[k] for k in keep]
+
+
 def box_to_mosaic(x1, y1, w, h, m):
     """Maps a frame-local box into mosaic-pixel space using the sample's
     affine transform m=[a,b,c,d,e,f] (same transform the viewer uses to
-    paint the frame). Transforms all four corners, not just top-left, so
-    rotation from the drone's yaw doesn't throw off the box size."""
+    paint the frame). Transforms all four corners, not just the top-left, and
+    returns their axis-aligned bounding box -- the viewer draws axis-aligned
+    rectangles, so an AABB is what it can actually use.
+
+    That AABB is exact only at multiples of 90 degrees; in between it inflates
+    with the drone's yaw. Worst case is 45 degrees, where a 40x20 box comes
+    back as ~42.4x42.4 (~2.25x the area). Kept on purpose: an oriented box has
+    nowhere to go in the viewer's rendering model."""
     a, b, c, d, e, f = m
     corners = [(x1, y1), (x1 + w, y1), (x1, y1 + h), (x1 + w, y1 + h)]
     mx = [a * u + c * v + e for u, v in corners]
@@ -216,9 +263,14 @@ def main():
 
     keep_classes = set(int(c) for c in args.classes.split(","))
 
-    data = json.load(open(args.data_json, encoding="utf-8"))
+    with open(args.data_json, encoding="utf-8") as f:
+        data = json.load(f)
     samples = data["samples"]
     step_t = (samples[1]["t"] - samples[0]["t"]) if len(samples) > 1 else 0.5
+    if step_t <= 0:
+        # duplicate/non-increasing sample timestamps -> ZeroDivisionError below
+        print(f"warning: sample spacing is {step_t}s (expected > 0); assuming 0.5s", file=sys.stderr)
+        step_t = 0.5
     stride = max(1, round(args.detect_every_sec / step_t))
     selected = samples[::stride]
     if args.max_seconds is not None:
@@ -229,9 +281,17 @@ def main():
     cap = cv2.VideoCapture(args.video_path)
     if not cap.isOpened():
         raise SystemExit(f"cannot open {args.video_path}")
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    fps = sane_fps(cap.get(cv2.CAP_PROP_FPS), args.video_path)
 
     sess = ort.InferenceSession(args.model_onnx, providers=["CPUExecutionProvider"])
+    # a --tile that disagrees with the model's fixed input either errors deep
+    # inside the first inference or, worse, mis-scales every box
+    in_shape = sess.get_inputs()[0].shape
+    if len(in_shape) == 4:
+        in_h, in_w = in_shape[2], in_shape[3]
+        if (isinstance(in_h, int) and in_h != args.tile) or (isinstance(in_w, int) and in_w != args.tile):
+            raise SystemExit(f"--tile {args.tile} does not match the input shape {in_shape} "
+                             f"of {args.model_onnx}")
 
     accumulated = []
     frame_idx = 0
@@ -251,13 +311,10 @@ def main():
             break
 
         boxes, scores, classes = run_tiled_inference(frame, sess, args.tile, args.overlap, args.conf, log=args.verbose_tiles)
-        keep = nms_per_class(boxes, scores, classes, args.iou)
-        keep = cross_class_dedup(boxes, scores, classes, keep)
+        keep = postprocess_frame(boxes, scores, classes, keep_classes, args.iou)
         n_new = 0
         for i in keep:
             c = classes[i]
-            if c not in keep_classes:
-                continue
             mosaic_box = box_to_mosaic(*boxes[i], target["m"])
             if min(mosaic_box[2], mosaic_box[3]) < args.min_box_dim:
                 continue  # too small to be real at this scale
@@ -291,6 +348,7 @@ def main():
             "detect_every_sec": args.detect_every_sec,
             "detections": accumulated,
         }, f, ensure_ascii=False, indent=2)
+        f.write("\n")
     print(f"wrote {args.out_json}", file=sys.stderr)
 
 
