@@ -10,14 +10,24 @@ Every sample draws the same way. Seams and ghosting are handled by edge
 feathering in the drawing code (template.html): each frame is opaque in
 the center and fades to transparent near its edges, so newer frames still
 fully replace old content in the middle while only the edge blends softly.
+
+Note on mosaic_scale: it is relative to the 640-px-wide work space the
+trajectory was estimated in, not to the source video. The effective
+video-pixel -> mosaic-pixel scale is mosaic_scale * work_width / src_width,
+so the 2.0 default is really ~0.333 on a 4K source (2.0 * 640 / 3840).
 """
+import argparse
 import json
 import numpy as np
 import sys
 
 def main(traj_path, out_path, mosaic_scale=2.0, padding=20):
-    d = json.load(open(traj_path))
+    with open(traj_path, encoding="utf-8") as f:
+        d = json.load(f)
     samples = d["samples"]
+    # min()/max() over an empty corner list is an opaque ValueError otherwise
+    if not samples:
+        raise SystemExit(f"{traj_path} has no samples -- nothing to build a mosaic from")
     work_w, work_h = d["work_width"], d["work_height"]
     src_w, src_h = d["src_width"], d["src_height"]
     ws = work_w / src_w  # video-pixel -> work-pixel scale
@@ -63,9 +73,17 @@ def main(traj_path, out_path, mosaic_scale=2.0, padding=20):
         "mosaic_width": mosaic_w, "mosaic_height": mosaic_h,
         "samples": out_samples,
     }
-    json.dump(out, open(out_path, "w"))
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(out, f)
+        f.write("\n")
     print(f"mosaic canvas: {mosaic_w} x {mosaic_h} px  ({len(out_samples)} samples)", file=sys.stderr)
     print(f"wrote {out_path}", file=sys.stderr)
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2])
+    # argparse instead of raw sys.argv indexing: running this with no arguments
+    # used to be an IndexError instead of a usage message
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("traj_path", help="trajectory_refined.json from loop_closure.py")
+    ap.add_argument("out_path", help="where to write the stream's data.json")
+    args = ap.parse_args()
+    main(args.traj_path, args.out_path)

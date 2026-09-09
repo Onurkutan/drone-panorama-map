@@ -13,6 +13,7 @@ corrected per-step speed against the raw trajectory; if the correction
 implies an impossible speed spike, it's rejected and the uncorrected
 trajectory ships instead.
 """
+import argparse
 import cv2
 import numpy as np
 import json
@@ -21,8 +22,24 @@ from scipy.optimize import least_squares
 
 ORB_FEATURES = 2500
 
+def write_passthrough(d, out_path, reason):
+    """Ships the input trajectory unchanged. Always stamps loop_closures_used
+    and a `correction` reason so a downstream reader can tell a real correction
+    from a fallback (they used to be indistinguishable)."""
+    out = dict(d)
+    out["loop_closures_used"] = 0
+    out["correction"] = reason
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(out, f)
+        f.write("\n")
+    print(f"wrote {out_path} (passthrough, correction={reason})", file=sys.stderr)
+
 def extract_node_frames(video_path, frame_indices, work_w, work_h):
     cap = cv2.VideoCapture(video_path)
+    # without this an unreadable video just yields no frames, which looks
+    # exactly like "the flight never revisits itself" further down
+    if not cap.isOpened():
+        raise SystemExit(f"cannot open {video_path}")
     wanted = sorted(set(frame_indices))
     wi = 0
     idx = 0
@@ -40,6 +57,9 @@ def extract_node_frames(video_path, frame_indices, work_w, work_h):
             wi += 1
         idx += 1
     cap.release()
+    if len(out) < len(wanted):
+        print(f"warning: decoded {len(out)}/{len(wanted)} node frames from {video_path} -- "
+              f"the missing ones can't take part in loop closure", file=sys.stderr)
     return out
 
 def orb_match(orb, bf, gray_a, gray_b, kp_des_cache, key_a, key_b):
@@ -190,12 +210,21 @@ def solve_pose_graph(n, edges, trans_norm, rot_norm, scale_norm, x0=None):
     return sol, unpack(sol.x)
 
 def main(video_path, traj_path, out_path, node_step=2, min_gap_s=10.0, top_k=3):
-    d = json.load(open(traj_path))
+    with open(traj_path, encoding="utf-8") as f:
+        d = json.load(f)
     samples = d["samples"]
     work_w, work_h = d["work_width"], d["work_height"]
     nodes = samples[::node_step]
     n = len(nodes)
     print(f"n nodes = {n}", file=sys.stderr)
+
+    # a pose graph needs at least two nodes and a median to normalise against;
+    # below that nodes[0] / np.median([]) just crash
+    if len(samples) < 3 or n < 2:
+        print(f"too few samples for loop closure ({len(samples)} sample(s), {n} node(s)) "
+              f"-> passthrough", file=sys.stderr)
+        write_passthrough(d, out_path, "too_few_samples")
+        return
 
     # adaptive distance threshold: ~0.5x typical frame footprint diagonal
     corners0 = np.array(nodes[0]["corners"])
@@ -232,8 +261,15 @@ def main(video_path, traj_path, out_path, node_step=2, min_gap_s=10.0, top_k=3):
     loop_edges_full = [(i, j, th, s, t, w) for (i, j, th, s, t, w, ninl) in loop_edges]
 
     if len(loop_edges_full) == 0:
-        print("no loop closures found -> passing trajectory through unchanged", file=sys.stderr)
-        json.dump(d, open(out_path, "w"))
+        # "never flew over the same ground" and "flew over it but nothing
+        # verified" are very different failures -- don't report them the same
+        if n_cand == 0:
+            print("no revisit candidates at all -> passing trajectory through unchanged", file=sys.stderr)
+            write_passthrough(d, out_path, "no_candidates")
+        else:
+            print(f"{n_cand} revisit candidate(s) found but none passed verification "
+                  f"-> passing trajectory through unchanged", file=sys.stderr)
+            write_passthrough(d, out_path, "none_accepted")
         return
 
     all_edges = seq_edges + loop_edges_full
@@ -395,14 +431,24 @@ def main(video_path, traj_path, out_path, node_step=2, min_gap_s=10.0, top_k=3):
     if sustained_ratio > 6.0 or jump_ratio > 5.0 or not sol.success:
         print("SANITY CHECK FAILED (implausible speed spike / discontinuity) -> rejecting correction, "
               "shipping uncorrected trajectory instead", file=sys.stderr)
-        json.dump(d, open(out_path, "w"))
+        write_passthrough(d, out_path, "rejected_sanity")
         return
 
     out = dict(d)
     out["samples"] = out_samples
     out["loop_closures_used"] = len(loop_edges_full)
-    json.dump(out, open(out_path, "w"))
+    out["correction"] = "applied"
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(out, f)
+        f.write("\n")
     print(f"wrote {out_path} (corrected, {len(loop_edges_full)} loop closures used)", file=sys.stderr)
 
 if __name__ == "__main__":
-    main(sys.argv[1], sys.argv[2], sys.argv[3])
+    # argparse instead of raw sys.argv indexing: running this with no arguments
+    # used to be an IndexError instead of a usage message
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("video_path")
+    ap.add_argument("traj_path", help="trajectory_raw.json from extract_trajectory.py")
+    ap.add_argument("out_path", help="where to write trajectory_refined.json")
+    args = ap.parse_args()
+    main(args.video_path, args.traj_path, args.out_path)

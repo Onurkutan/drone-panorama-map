@@ -10,22 +10,40 @@ gets corrected by loop_closure.py next -- see build_stream.py for the chain.
 
 Usage: extract_trajectory.py <video> <out_raw_trajectory.json> [max_seconds]
 """
+import argparse
 import cv2
 import numpy as np
 import json
+import math
 import sys
 import os
 import time
+
+def sane_fps(raw_fps, video_path):
+    """OpenCV reports 0 (and occasionally NaN/inf) for containers it can't read
+    the rate from; `raw or 30.0` misses NaN, and a bad fps silently shifts every
+    sample timestamp. Kept in the same shape in render_preview/detect_objects."""
+    fps = float(raw_fps or 0.0)
+    if not math.isfinite(fps) or fps <= 0:
+        print(f"warning: unusable fps ({raw_fps!r}) from {video_path}, falling back to 30.0", file=sys.stderr)
+        return 30.0
+    return fps
 
 def main(video_path, out_json, work_width=640, sample_every_sec=0.5, max_seconds=None):
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise SystemExit(f"cannot open {video_path}")
 
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    fps = sane_fps(cap.get(cv2.CAP_PROP_FPS), video_path)
     total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
     src_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
     src_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    # a 0 here would be a ZeroDivisionError two lines down, with no hint why
+    if src_w <= 0 or src_h <= 0:
+        raise SystemExit(f"cannot read frame size from {video_path} (got {src_w}x{src_h})")
+    if total_frames <= 0:
+        print(f"warning: frame count unknown ({total_frames}) for {video_path}; "
+              f"decoding until the video ends", file=sys.stderr)
     scale = work_width / src_w
     work_h = int(src_h * scale)
     print(f"fps={fps:.2f} frames={total_frames} src={src_w}x{src_h} work={work_width}x{work_h}", file=sys.stderr)
@@ -107,7 +125,7 @@ def main(video_path, out_json, work_width=640, sample_every_sec=0.5, max_seconds
     elapsed = time.time() - t0
     print(f"samples={len(samples)} failed_chain_steps={failed_chain} elapsed={elapsed:.1f}s", file=sys.stderr)
 
-    with open(out_json, "w") as f:
+    with open(out_json, "w", encoding="utf-8") as f:
         json.dump({
             "video": os.path.basename(video_path),
             "fps": fps,
@@ -118,11 +136,17 @@ def main(video_path, out_json, work_width=640, sample_every_sec=0.5, max_seconds
             "sample_every_sec": sample_every_sec,
             "samples": samples,
         }, f)
+        f.write("\n")
     print(f"wrote {out_json}", file=sys.stderr)
 
 
 if __name__ == "__main__":
-    video = sys.argv[1]
-    out = sys.argv[2]
-    max_s = float(sys.argv[3]) if len(sys.argv) > 3 else None
-    main(video, out, max_seconds=max_s)
+    # argparse instead of raw sys.argv indexing: running this with no arguments
+    # used to be an IndexError instead of a usage message
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("video_path")
+    ap.add_argument("out_json")
+    ap.add_argument("max_seconds", nargs="?", type=float, default=None,
+                    help="stop after this many seconds of video (default: the whole video)")
+    args = ap.parse_args()
+    main(args.video_path, args.out_json, max_seconds=args.max_seconds)

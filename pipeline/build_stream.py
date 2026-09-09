@@ -29,6 +29,40 @@ import loop_closure
 import build_mosaic_transforms
 
 
+def load_manifest(path):
+    """Reads and validates streams/manifest.json. Called before stage 1 so a
+    corrupt manifest fails now instead of after minutes of pipeline work."""
+    if not os.path.isfile(path):
+        return {"streams": []}
+    try:
+        with open(path, encoding="utf-8") as f:
+            manifest = json.load(f)
+    except (OSError, ValueError) as e:
+        raise SystemExit(f"cannot read {path}: {e}")
+    if not isinstance(manifest, dict) or not isinstance(manifest.get("streams"), list):
+        raise SystemExit(f"{path} is not a valid manifest -- expected a top-level 'streams' list")
+    for i, entry in enumerate(manifest["streams"]):
+        if not isinstance(entry, dict) or not entry.get("id"):
+            raise SystemExit(f"{path}: streams[{i}] has no usable 'id' field")
+    return manifest
+
+
+def relative_to_root(path, project_root):
+    """index.html loads videos/data by path relative to the project root, so
+    anything outside it (or on another Windows drive) can't be reached from
+    the page -- warn and fall back to an absolute path rather than emit a
+    silently broken '..' link."""
+    try:
+        rel = os.path.relpath(path, project_root)
+    except ValueError:
+        rel = None
+    if rel is None or rel == ".." or rel.startswith(".." + os.sep):
+        print(f"warning: {path} is outside the project root {project_root} -- index.html may not "
+              f"be able to reach it; storing the absolute path instead", file=sys.stderr)
+        return path.replace(os.sep, "/")
+    return rel.replace(os.sep, "/")
+
+
 def build_stream(video_path, stream_id, label=None, max_seconds=None, project_root=".", streams_dirname="streams"):
     project_root = os.path.abspath(project_root)
     video_path = os.path.abspath(video_path)
@@ -41,6 +75,11 @@ def build_stream(video_path, stream_id, label=None, max_seconds=None, project_ro
     raw_path = os.path.join(stream_dir, "trajectory_raw.json")
     refined_path = os.path.join(stream_dir, "trajectory_refined.json")
     data_path = os.path.join(stream_dir, "data.json")
+
+    # validate the manifest up front -- discovering it's corrupt after the
+    # three slow stages have run wastes the whole run
+    manifest_path = os.path.join(project_root, streams_dirname, "manifest.json")
+    manifest = load_manifest(manifest_path)
 
     print(f"=== [1/3] visual odometry: {video_path} -> {raw_path}", file=sys.stderr)
     t0 = time.time()
@@ -58,22 +97,18 @@ def build_stream(video_path, stream_id, label=None, max_seconds=None, project_ro
     print(f"    ({time.time()-t0:.1f}s)", file=sys.stderr)
 
     # store paths relative to project root, same place index.html lives
-    video_rel = os.path.relpath(video_path, project_root)
-    data_rel = os.path.relpath(data_path, project_root)
-
-    manifest_path = os.path.join(project_root, streams_dirname, "manifest.json")
-    manifest = {"streams": []}
-    if os.path.isfile(manifest_path):
-        manifest = json.load(open(manifest_path))
-
     entry = {
         "id": stream_id,
         "label": label or stream_id,
-        "video": video_rel.replace(os.sep, "/"),
-        "data": data_rel.replace(os.sep, "/"),
+        "video": relative_to_root(video_path, project_root),
+        "data": relative_to_root(data_path, project_root),
     }
     manifest["streams"] = [s for s in manifest["streams"] if s["id"] != stream_id] + [entry]
-    json.dump(manifest, open(manifest_path, "w"), indent=2, ensure_ascii=False)
+    # encoding is explicit: package.py reads this back as UTF-8, so a non-ASCII
+    # --label written in the machine's default codepage breaks packaging
+    with open(manifest_path, "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=2, ensure_ascii=False)
+        f.write("\n")
     print(f"=== updated {manifest_path} ({len(manifest['streams'])} stream(s) total)", file=sys.stderr)
     return entry
 
