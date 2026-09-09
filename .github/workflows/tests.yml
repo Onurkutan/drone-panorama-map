@@ -1,0 +1,39 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Install Playwright Chromium
+        run: python -m playwright install --with-deps chromium
+
+      - name: Unit tests
+        run: pytest -m "not browser"
+
+      - name: Browser tests
+        run: pytest -m browser
+
+      - name: Packaged index.html is up to date
+        shell: bash
+        run: |
+          python scripts/package.py --out /tmp/index.html
+          diff <(tr -d '\r' < index.html) <(tr -d '\r' < /tmp/index.html)

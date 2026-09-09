@@ -1,5 +1,7 @@
 # Drone Panorama Map
 
+[![tests](https://github.com/Onurkutan/drone-panorama-map/actions/workflows/tests.yml/badge.svg)](https://github.com/Onurkutan/drone-panorama-map/actions/workflows/tests.yml)
+
 > Built during my 2026 summer internship. This repository is the public
 > version of the delivered project; further improvements land as small
 > follow-up commits.
