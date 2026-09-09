@@ -168,10 +168,13 @@ const bctx = base.getContext('2d');
 const octx = overlay.getContext('2d');
 const dctx = detCanvas.getContext('2d');
 const tctx = tactical.getContext('2d');
-// Base canvas starts fully TRANSPARENT (not filled with a color) -- unpainted
-// mosaic area is shown by the dark CSS background behind it instead. This is
-// what makes the "paint only empty ground" compositing below possible: an
-// unpainted pixel must have alpha=0, not just "look dark".
+// Base canvas starts fully TRANSPARENT (not filled with a color), so every
+// pixel the drone hasn't flown over yet simply shows the dark CSS background
+// of #mosaicBase through it -- "not mapped yet" costs no drawing at all and
+// stays visually distinct from ground that was mapped and happens to be dark.
+// Frames are then painted onto it with ordinary 'source-over' compositing
+// (see tick() below); what keeps their overlaps from showing hard seams is
+// the per-frame alpha of the feather mask, not any special blend mode.
 
 // `samples` and `activeStream` point at whichever stream is currently
 // selected -- loadStream() below reassigns them (and everything that
@@ -182,8 +185,17 @@ const tctx = tactical.getContext('2d');
 // number of streams.
 let activeStream = null;
 let samples = [];
+// Seconds between two consecutive samples in the current stream's track --
+// set once per stream in loadStream(), used by tick() to decide how far past
+// the end of the track a frame may still be mapped.
+let sampleInterval = 0.5;
 
 function interpAt(t) {
+  // A stream whose data.json carries no samples has no mosaic geometry at
+  // all. Hand back a harmless identity transform rather than throwing on
+  // samples[0] sixty times a second -- loadStream() has already put the real
+  // explanation in the error banner.
+  if (!samples.length) return { t, m: [1, 0, 0, 1, 0, 0], center: [0, 0] };
   if (t <= samples[0].t) return samples[0];
   if (t >= samples[samples.length - 1].t) return samples[samples.length - 1];
   let lo = 0, hi = samples.length - 1;
@@ -247,6 +259,19 @@ document.getElementById('followBtn').onclick = (e) => {
   follow = !follow;
   e.target.textContent = follow ? '📍 Follow position: On' : '📍 Follow position: Off';
 };
+// Turn "follow position" off (and keep the toolbar button honest about it).
+// Every interaction that means "I want to look at THIS spot" has to call
+// this, because the follow lerp in tick() drags the view ~8% of the way back
+// toward the drone on every animation frame -- it would undo a pan, and slide
+// a zoom's anchor point out from under the cursor, in a fraction of a second.
+// Zoom-reset calls it too: going back to 100% while following is harmless in
+// itself, but having one zoom control silently keep following while the other
+// three don't is the kind of inconsistency that reads as a bug.
+function disableFollow() {
+  if (!follow) return;
+  follow = false;
+  document.getElementById('followBtn').textContent = '📍 Follow position: Off';
+}
 document.getElementById('resetBtn').onclick = () => {
   bctx.clearRect(0, 0, base.width, base.height);
   drawnCount = 0;
@@ -281,16 +306,22 @@ document.getElementById('mapArea').addEventListener('mousedown', (e) => {
   // it would keep pulling the view back toward the drone's position every
   // animation frame, fighting the drag. The user can turn it back on from
   // the toolbar button.
-  if (follow) {
-    follow = false;
-    document.getElementById('followBtn').textContent = '📍 Follow position: Off';
-  }
+  disableFollow();
   wrap.classList.add('panning');
   e.preventDefault(); // block the browser's built-in middle-click autoscroll icon
 });
 window.addEventListener('mousemove', (e) => {
   if (!panDrag) return;
   const wrap = document.getElementById('mosaicWrap');
+  // A button released OUTSIDE the browser window delivers no mouseup at all,
+  // so the drag would still be live when the cursor comes back and the map
+  // would lurch. `buttons === 0` on a move means the release already happened
+  // somewhere we couldn't see it -- end the drag here instead.
+  if (e.buttons === 0) {
+    panDrag = null;
+    wrap.classList.remove('panning');
+    return;
+  }
   wrap.scrollLeft = panDrag.scrollLeft - (e.clientX - panDrag.startX);
   wrap.scrollTop = panDrag.scrollTop - (e.clientY - panDrag.startY);
 });
@@ -337,58 +368,111 @@ function setZoom(newZoom, anchorClientX, anchorClientY) {
 document.getElementById('mapArea').addEventListener('wheel', (e) => {
   if (e.target.closest('#videoPip')) return; // don't zoom the map while over the video window
   e.preventDefault();
+  disableFollow(); // otherwise the follow lerp yanks the anchored point away again
   const factor = Math.exp(-e.deltaY * 0.0018);
   setZoom(zoom * factor, e.clientX, e.clientY);
 }, { passive: false });
 
-document.getElementById('zoomInBtn').onclick = () => setZoom(zoom * 1.3);
-document.getElementById('zoomOutBtn').onclick = () => setZoom(zoom / 1.3);
-document.getElementById('zoomResetBtn').onclick = () => setZoom(1);
+document.getElementById('zoomInBtn').onclick = () => { disableFollow(); setZoom(zoom * 1.3); };
+document.getElementById('zoomOutBtn').onclick = () => { disableFollow(); setZoom(zoom / 1.3); };
+document.getElementById('zoomResetBtn').onclick = () => { disableFollow(); setZoom(1); };
 
 const vid = document.getElementById('vid');
 let lastDrawnT = -999;
 let drawnCount = 0;
+let warnedDrawError = false; // one report per stream, see the catch in tick()
 
 function tick() {
   const t = vid.currentTime;
   const s = interpAt(t);
   const [a, b, c, d, e, f] = s.m;
 
+  // Only the span the sample track actually covers can be mapped. interpAt()
+  // deliberately CLAMPS outside it, which is right for the position marker
+  // but wrong for painting: every frame past the end would be stamped at the
+  // same frozen last transform, smearing the rest of the video into one spot
+  // on a canvas that is never repainted. One sample interval of slack keeps
+  // the legitimate frames between the last sample and the next one from being
+  // dropped.
+  const mapped = samples.length > 0 &&
+    t >= samples[0].t - sampleInterval &&
+    t <= samples[samples.length - 1].t + sampleInterval;
+
   // Draw the current video frame onto the accumulator, warped into mosaic
   // space, with feathered edges (see buildFeatherMask above) so it blends
   // softly into whatever's already there instead of cutting a hard seam.
-  if (!vid.paused && !vid.ended && Math.abs(t - lastDrawnT) > 0.02) {
-    try {
-      if (!offCanvas) {
-        offCanvas = document.createElement('canvas');
-        offCanvas.width = vid.videoWidth;
-        offCanvas.height = vid.videoHeight;
-        offCtx = offCanvas.getContext('2d', { willReadFrequently: false });
-        featherMaskCanvas = buildFeatherMask(vid.videoWidth, vid.videoHeight, FEATHER_MARGIN_FRAC);
+  //
+  // The readyState/seeking half of this condition matters because while the
+  // user scrubs the video, currentTime already reports the NEW position while
+  // the decoder is still showing the OLD frame -- painting then would stamp
+  // the old frame with the new transform, permanently.
+  if (!vid.paused && !vid.ended && !vid.seeking && vid.readyState >= 2 && mapped &&
+      Math.abs(t - lastDrawnT) > 0.02) {
+    let drew = false;
+    // videoWidth/videoHeight are 0 until metadata has loaded. Building the
+    // offscreen buffer from those zeros would latch a 0x0 canvas AND a 0x0
+    // feather mask for the rest of the session -- the "if (!offCanvas)" guard
+    // below only ever runs once, so there would be no second chance, and
+    // every later frame would throw inside the try. Wait one tick instead.
+    if (vid.videoWidth && vid.videoHeight) {
+      try {
+        if (!offCanvas) {
+          // Built into locals first and only published once BOTH the buffer
+          // and its mask exist, so a throw halfway through can't leave a
+          // half-built pair latched in the globals.
+          const oc = document.createElement('canvas');
+          oc.width = vid.videoWidth;
+          oc.height = vid.videoHeight;
+          const ocCtx = oc.getContext('2d', { willReadFrequently: false });
+          const mask = buildFeatherMask(vid.videoWidth, vid.videoHeight, FEATHER_MARGIN_FRAC);
+          offCanvas = oc; offCtx = ocCtx; featherMaskCanvas = mask;
+        }
+        // 1) draw the frame at full opacity into the offscreen buffer
+        offCtx.globalCompositeOperation = 'source-over';
+        offCtx.drawImage(vid, 0, 0, vid.videoWidth, vid.videoHeight);
+        // 2) punch the feather mask's alpha into it (opaque center, fading edges)
+        offCtx.globalCompositeOperation = 'destination-in';
+        offCtx.drawImage(featherMaskCanvas, 0, 0);
+        offCtx.globalCompositeOperation = 'source-over';
+        // 3) composite the now edge-feathered frame onto the mosaic, warped
+        bctx.setTransform(a, b, c, d, e, f);
+        bctx.imageSmoothingEnabled = true;
+        bctx.drawImage(offCanvas, 0, 0);
+        bctx.setTransform(1, 0, 0, 1, 0, 0);
+        drew = true;
+      } catch (err) {
+        // Not swallowed silently: when this fails the mosaic just stops
+        // growing, which from the outside looks like "the video is playing
+        // and nothing is happening" with no clue as to why. Reported once per
+        // stream (loadStream resets the flag) so a per-frame failure can't
+        // spam the console 60 times a second.
+        if (!warnedDrawError) {
+          warnedDrawError = true;
+          console.warn('mosaic composite failed', err);
+          showError('could not composite the video frame onto the mosaic -- ' + ((err && err.message) || err));
+        }
       }
-      // 1) draw the frame at full opacity into the offscreen buffer
-      offCtx.globalCompositeOperation = 'source-over';
-      offCtx.drawImage(vid, 0, 0, vid.videoWidth, vid.videoHeight);
-      // 2) punch the feather mask's alpha into it (opaque center, fading edges)
-      offCtx.globalCompositeOperation = 'destination-in';
-      offCtx.drawImage(featherMaskCanvas, 0, 0);
-      offCtx.globalCompositeOperation = 'source-over';
-      // 3) composite the now edge-feathered frame onto the mosaic, warped
-      bctx.setTransform(a, b, c, d, e, f);
-      bctx.imageSmoothingEnabled = true;
-      bctx.drawImage(offCanvas, 0, 0);
-      bctx.setTransform(1, 0, 0, 1, 0, 0);
-    } catch (err) { /* video not ready yet */ }
-    lastDrawnT = t;
-    drawnCount++;
-    document.getElementById('progressLabel').textContent = drawnCount + ' frames drawn';
+    }
+    // Counters and the detection reveal only advance when a frame really
+    // landed on the canvas. Otherwise "N frames drawn" would keep climbing
+    // over a mosaic that stopped growing, and detections would be revealed
+    // over ground that was never painted.
+    if (drew) {
+      lastDrawnT = t;
+      drawnCount++;
+      document.getElementById('progressLabel').textContent = drawnCount + ' frames drawn';
 
-    // Reveal any detections whose ground has JUST been painted -- see
-    // revealDetectionsUpTo() (in the "detected vehicles" section below) for
-    // why this is gated on the exact same "a frame was actually just
-    // drawn" condition as the mosaic paint above, rather than running on
-    // every animation frame.
-    revealDetectionsUpTo(t);
+      // Reveal any detections whose ground has JUST been painted -- see
+      // revealDetectionsUpTo() (in the "detected vehicles" section below) for
+      // why this is gated on the exact same "a frame was actually just
+      // drawn" condition as the mosaic paint above, rather than running on
+      // every animation frame.
+      revealDetectionsUpTo(t);
+    }
+  } else if (!vid.paused && !vid.ended && !mapped) {
+    // Playback has run off the end (or before the start) of the mapped span.
+    // Say so rather than leaving a frozen counter that looks like a stall.
+    document.getElementById('progressLabel').textContent = drawnCount + ' frames drawn (beyond mapped range)';
   }
 
   // live position marker on the overlay (always redrawn, cheap)
@@ -445,6 +529,9 @@ pipHeader.addEventListener('mousedown', (e) => {
 });
 window.addEventListener('mousemove', (e) => {
   if (!pipDrag) return;
+  // Same "released outside the window, so no mouseup ever arrived" guard as
+  // the map pan above -- without it the video window sticks to the cursor.
+  if (e.buttons === 0) { pipDrag = null; return; }
   const mapRect = mapArea.getBoundingClientRect();
   let nx = e.clientX - pipDrag.dx - mapRect.left;
   let ny = e.clientY - pipDrag.dy - mapRect.top;
@@ -548,8 +635,11 @@ function renderDetections() {
   let shown = 0;
   for (const d of activeDetections) {
     if (!revealedDetIds.has(d.id) || removedDetIds.has(d.id)) continue;
-    shown++;
     if (!showDetections) continue;
+    // Counted only once a box is actually about to be drawn, so the badge
+    // reads (0/N) while the layer is toggled off instead of claiming N boxes
+    // are on screen when the canvas is blank.
+    shown++;
     const color = DET_COLORS[d.class] || '#e5e7eb';
     dctx.save();
     dctx.strokeStyle = color;
@@ -944,7 +1034,14 @@ tactical.addEventListener('mousedown', (e) => {
   }
 });
 
-tactical.addEventListener('mouseup', () => {
+// Bound to `window`, not to #tacticalCanvas: a drag or a freehand stroke very
+// often ENDS with the cursor somewhere else -- over the toolbars, over the
+// floating video window, past the edge of the map. A canvas-only mouseup
+// never fires there, leaving draggingItem/freehandPoints set, so the item
+// stayed glued to the cursor the moment it came back over the map. The pan
+// and video-window drags already listen on window for the same reason.
+window.addEventListener('mouseup', (e) => {
+  if (e.button !== 0) return; // left button only -- the middle button pans the map
   if (draggingItem) { saveTactical(); draggingItem = null; dragStart = null; }
   if (freehandPoints) {
     if (freehandPoints.length > 1) {
@@ -1027,10 +1124,18 @@ tactical.addEventListener('dblclick', (e) => {
 
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
-    pendingPoints = null; freehandPoints = null; renderTactical();
-  } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId != null) {
-    // avoid stealing Backspace while any text field might be focused (none exist here besides prompt(), which blocks input anyway)
-    deleteSelected();
+    // "Never mind": drop the half-finished shape AND the current selection,
+    // so Escape means the same thing whatever the user was in the middle of.
+    pendingPoints = null; freehandPoints = null;
+    selectedId = null;
+    renderTactical();
+  } else if (e.key === 'Delete' || e.key === 'Backspace') {
+    // Don't steal these from a focused control: Backspace is "go back a
+    // character" in a field, and both keys belong to the stream <select> and
+    // the video element's own controls while either has focus.
+    const tag = document.activeElement ? document.activeElement.tagName : '';
+    if (tag === 'SELECT' || tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'VIDEO') return;
+    if (selectedId != null) deleteSelected();
   }
 });
 
@@ -1046,7 +1151,15 @@ function loadStream(id) {
   const s = STREAMS.find(x => x.id === id);
   if (!s) return;
   activeStream = s;
-  samples = s.samples;
+  samples = s.samples || [];
+  // Samples are emitted on a fixed cadence by pipeline/build_stream.py, so
+  // the first gap is the cadence; the fallback only matters for a one-sample
+  // (or malformed) track. tick() uses it as the slack around the mapped span.
+  sampleInterval = (samples.length > 1 && samples[1].t > samples[0].t) ? samples[1].t - samples[0].t : 0.5;
+  if (!samples.length) {
+    showError('stream "' + s.label + '" has no mosaic samples -- re-run pipeline/build_stream.py for it. '
+      + 'The video still plays, but nothing can be placed on the map.');
+  }
 
   base.width = overlay.width = detCanvas.width = tactical.width = s.mosaic_width;
   base.height = overlay.height = detCanvas.height = tactical.height = s.mosaic_height;
@@ -1071,11 +1184,11 @@ function loadStream(id) {
   // frame on its own (see the "if (!offCanvas)" block above).
   featherMaskCanvas = null;
   offCanvas = null; offCtx = null;
+  warnedDrawError = false; // a new stream gets a fresh chance to report a draw failure
 
   vid.pause();
   vid.src = s.video;
-  vid.currentTime = 0;
-  vid.load();
+  vid.load(); // rewinds to the start on its own -- setting currentTime first would be a no-op
 
   zoom = 1;
   stack.style.transform = 'scale(1)';
@@ -1106,8 +1219,15 @@ for (const s of STREAMS) {
 streamSelectEl.onchange = () => loadStream(streamSelectEl.value);
 
 setTool('select');
-loadStream(STREAMS[0].id);
-requestAnimationFrame(tick);
+if (!STREAMS.length) {
+  // Nothing was embedded at package time -- start neither the stream nor the
+  // animation loop, and say why, rather than throwing on STREAMS[0].
+  showError('no streams are embedded in this file -- run pipeline/build_stream.py for at least one video, '
+    + 'then scripts/package.py to rebuild index.html.');
+} else {
+  loadStream(STREAMS[0].id);
+  requestAnimationFrame(tick);
+}
 </script>
 </body>
 </html>
