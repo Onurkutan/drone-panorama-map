@@ -16,7 +16,10 @@ from package import build_streams_array
 
 def _write(path, obj):
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    json.dump(obj, open(path, "w"))
+    # explicit UTF-8 + trailing newline, same as the real writers in pipeline/
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f)
+        f.write("\n")
 
 
 def test_stream_without_detections_json_gets_empty_list():

@@ -39,19 +39,22 @@ def build_streams_array(project_root):
             f"no streams/manifest.json found at {manifest_path} -- "
             f"run pipeline/build_stream.py for at least one video first"
         )
-    manifest = json.load(open(manifest_path, encoding="utf-8"))
+    with open(manifest_path, encoding="utf-8") as f:
+        manifest = json.load(f)
     streams = []
     for entry in manifest["streams"]:
         data_path = os.path.join(project_root, entry["data"])
         if not os.path.isfile(data_path):
             raise SystemExit(f"manifest references missing data file: {data_path}")
-        data = json.load(open(data_path, encoding="utf-8"))
+        with open(data_path, encoding="utf-8") as f:
+            data = json.load(f)
 
         # detections.json is optional -- streams without one just get an empty list
         detections_path = os.path.join(os.path.dirname(data_path), "detections.json")
         detections = []
         if os.path.isfile(detections_path):
-            det_data = json.load(open(detections_path, encoding="utf-8"))
+            with open(detections_path, encoding="utf-8") as f:
+                det_data = json.load(f)
             detections = det_data.get("detections", [])
 
         streams.append({
@@ -74,7 +77,8 @@ def package(project_root=".", template_path=None, out_path=None):
     out_path = out_path or os.path.join(project_root, "index.html")
 
     streams = build_streams_array(project_root)
-    template = open(template_path, encoding="utf-8").read()
+    with open(template_path, encoding="utf-8") as f:
+        template = f.read()
 
     streams_json = json.dumps(streams, ensure_ascii=False, separators=(",", ":"))
     replacement = r"\1const STREAMS = " + streams_json.replace("\\", "\\\\") + r";\n\2"
