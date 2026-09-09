@@ -1,0 +1,16 @@
+{
+  "streams": [
+    {
+      "id": "ornek",
+      "label": "Park flight",
+      "video": "ornek.mp4",
+      "data": "streams/ornek/data.json"
+    },
+    {
+      "id": "ornek2",
+      "label": "Nursery garden flight",
+      "video": "ornek2.mp4",
+      "data": "streams/ornek2/data.json"
+    }
+  ]
+}

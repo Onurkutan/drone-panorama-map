@@ -1,0 +1,1121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Drone Panorama Map</title>
+<style>
+  :root { color-scheme: dark; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; overflow: hidden; }
+  body { font-family: system-ui, Arial, sans-serif; background:#080a08; color:#dfe6df; display:flex; flex-direction:column; }
+  header { flex: 0 0 auto; padding: 8px 16px; background:#10140f; border-bottom:1px solid #263326; display:flex; align-items:center; gap:12px; }
+  header h1 { font-size:14px; margin:0; font-weight:600; letter-spacing:.02em; }
+  .live { display:inline-flex; align-items:center; gap:5px; background:#7f1d1d; padding:3px 9px; border-radius:12px; font-size:11px; font-weight:600; }
+  .live .dot { width:7px; height:7px; border-radius:50%; background:#ff4d4d; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:.3;} }
+  #streamPicker { display:inline-flex; align-items:center; gap:6px; }
+  #streamPicker label { font-size:11px; color:#8a9a8a; }
+  #streamSelect { background:#16201a; color:#dfe6df; border:1px solid #2f4030; border-radius:6px; padding:4px 8px; font-size:12px; }
+  #clock { font-size:12px; color:#8a9a8a; margin-left:auto; font-variant-numeric: tabular-nums; font-family: 'Courier New', monospace; }
+  button.tool { background:#16201a; color:#dfe6df; border:1px solid #2f4030; padding:5px 11px; border-radius:6px; cursor:pointer; font-size:12px; white-space:nowrap; }
+  button.tool:hover { background:#1e2c22; }
+  button.tool.active { background:#234023; border-color:#4caf50; color:#fff; }
+  #detCountLabel { font-size:11px; color:#7c8c7c; font-family:'Courier New', monospace; }
+
+  /* Full-width toolbars -- unlike a split-panel layout, these never lose
+     width (and never have to shrink their buttons) no matter how the map
+     itself is zoomed/panned, because the map lives in its own layer below,
+     not in a box that competes for width with a video panel. */
+  #rightToolbar, #tacticalToolbar { flex: 0 0 auto; padding:6px 10px; display:flex; gap:8px; align-items:center; border-bottom:1px solid #263326; flex-wrap:wrap; }
+  #rightToolbar { background:#10140f; }
+  #progressLabel { font-size:11px; color:#7c8c7c; margin-left:auto; font-family: 'Courier New', monospace; }
+
+  #tacticalToolbar { background:#0d110d; gap:14px; }
+  .toolGroup { display:flex; gap:4px; align-items:center; padding:2px 6px; background:#0a0d0a; border:1px solid #202b20; border-radius:8px; }
+  .toolGroup .glabel { font-size:10px; color:#63735f; text-transform:uppercase; letter-spacing:.06em; margin-right:4px; }
+  button.tbtn { background:transparent; color:#b9c7b9; border:1px solid transparent; width:30px; height:28px; border-radius:5px; cursor:pointer; font-size:14px; display:flex; align-items:center; justify-content:center; }
+  button.tbtn:hover { background:#1c281c; }
+  button.tbtn.active { background:#234023; border-color:#4caf50; color:#fff; }
+  button.abtn { width:22px; height:22px; border-radius:50%; border:2px solid #333; background:var(--c); cursor:pointer; padding:0; }
+  button.abtn.active { border-color:#fff; box-shadow:0 0 0 2px #4caf50; }
+  #coordReadout { font-size:11px; color:#6fae6f; font-family:'Courier New', monospace; white-space:nowrap; }
+  #itemCount { font-size:11px; color:#7c8c7c; margin-left:auto; font-family:'Courier New', monospace; }
+
+  /* The map now owns the ENTIRE remaining viewport -- no more halved-screen
+     split with the video. */
+  #mapArea { position:relative; flex:1 1 auto; min-height:0; background:#0c0f0c; }
+  #mosaicWrap { position:absolute; inset:0; overflow:auto; }
+  #mosaicStack { position:relative; transform-origin: 0 0; }
+  #mosaicBase, #mosaicOverlay, #detectionsCanvas, #tacticalCanvas { display:block; position:absolute; top:0; left:0; }
+  #mosaicBase { background:#181c18; }
+  #detectionsCanvas { pointer-events:none; }
+  #tacticalCanvas.toolActive { cursor: crosshair; }
+  #tacticalCanvas.toolSelect { cursor: default; }
+  #tacticalCanvas.detEditMode { cursor: pointer; }
+  #mosaicWrap.panning, #mosaicWrap.panning #tacticalCanvas { cursor: grabbing !important; }
+
+  /* Live video as a small floating, draggable, resizable window over the
+     map -- picture-in-picture style, like a real tactical map app -- instead
+     of a fixed half-screen panel that ate space the map needed. */
+  #videoPip {
+    position:absolute; left:16px; bottom:16px; width:340px; height:210px;
+    min-width:200px; min-height:120px; max-width:90vw; max-height:90vh;
+    background:#000; border:1px solid #2f4030; border-radius:8px; overflow:hidden;
+    box-shadow: 0 6px 24px rgba(0,0,0,.55); z-index:80;
+    resize: both; display:flex; flex-direction:column;
+  }
+  #videoPip.minimized { height:auto !important; resize:none; }
+  #videoPip.hidden { display:none; }
+  #videoPipHeader { flex:0 0 auto; background:#10140f; padding:4px 4px 4px 8px; display:flex; align-items:center; gap:2px; cursor:move; font-size:11px; color:#9db69d; user-select:none; border-bottom:1px solid #263326; }
+  #videoPipHeader .title { flex:1; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  #videoPipHeader button { background:transparent; border:none; color:#9db69d; cursor:pointer; font-size:13px; padding:3px 7px; border-radius:3px; line-height:1; }
+  #videoPipHeader button:hover { background:#1c281c; color:#fff; }
+  #videoPip video { flex:1 1 auto; min-height:0; width:100%; height:100%; object-fit:contain; display:block; background:#000; }
+  #videoPip.minimized video { display:none; }
+
+  #errBanner { position:fixed; top:0; left:0; right:0; background:#7f1d1d; color:#fff; padding:8px 14px; font-size:12px; z-index:9999; display:none; white-space:pre-wrap; }
+</style>
+</head>
+<body>
+<div id="errBanner"></div>
+<header>
+  <span class="live"><span class="dot"></span> LIVE (simulated)</span>
+  <h1 id="videoTitle">Drone Panorama Map</h1>
+  <span id="streamPicker">
+    <label for="streamSelect">Stream:</label>
+    <select id="streamSelect"></select>
+  </span>
+  <span id="clock">00:00 / 00:00</span>
+</header>
+<div id="rightToolbar">
+  <button class="tool" id="resetBtn">↺ Reset mosaic</button>
+  <button class="tool" id="followBtn">📍 Follow position: On</button>
+  <button class="tool" id="videoToggleBtn">🎥 Video: Visible</button>
+  <button class="tool" id="detToggleBtn">🚗 Detected vehicles: On</button>
+  <span id="detCountLabel">(0/0)</span>
+  <button class="tool" id="detEditBtn" title="Turn this on, then click a detection box to remove it">🗑️ Remove false detections: Off</button>
+  <button class="tool" id="detRestoreBtn" title="Bring back every detection removed on this stream">↺ Restore removed (0)</button>
+  <span class="toolGroup" style="padding:2px 4px;">
+    <button class="tbtn" id="zoomOutBtn" title="Zoom out">−</button>
+    <span id="zoomLabel" style="font-size:11px; color:#9db69d; font-family:'Courier New', monospace; min-width:38px; text-align:center; display:inline-block;">100%</span>
+    <button class="tbtn" id="zoomInBtn" title="Zoom in">+</button>
+    <button class="tbtn" id="zoomResetBtn" title="Reset zoom (100%)">⤾</button>
+  </span>
+  <span id="progressLabel">0 frames drawn</span>
+</div>
+<div id="tacticalToolbar">
+  <div class="toolGroup" id="toolButtons">
+    <span class="glabel">Tool</span>
+    <button class="tbtn active" data-tool="select" title="Select / Move">⇧</button>
+    <button class="tbtn" data-tool="marker" title="Place marker">⚑</button>
+    <button class="tbtn" data-tool="line" title="Draw line (double-click to finish)">╱</button>
+    <button class="tbtn" data-tool="area" title="Draw area (double-click to finish)">▱</button>
+    <button class="tbtn" data-tool="freehand" title="Freehand draw">✎</button>
+    <button class="tbtn" data-tool="text" title="Add text">T</button>
+    <button class="tbtn" data-tool="measure" title="Measure distance (pixels)">↔</button>
+  </div>
+  <div class="toolGroup" id="affilButtons">
+    <span class="glabel">Symbol</span>
+    <button class="abtn active" data-aff="friendly" title="Friendly" style="--c:#3b82f6"></button>
+    <button class="abtn" data-aff="hostile" title="Hostile" style="--c:#ef4444"></button>
+    <button class="abtn" data-aff="neutral" title="Neutral" style="--c:#22c55e"></button>
+    <button class="abtn" data-aff="unknown" title="Unknown" style="--c:#eab308"></button>
+    <button class="abtn" data-aff="poi" title="Point of interest" style="--c:#e5e7eb"></button>
+  </div>
+  <button class="tool" id="gridBtn">▦ Grid: On</button>
+  <button class="tool" id="deleteBtn">🗑 Delete selected</button>
+  <button class="tool" id="clearAllBtn">⨯ Clear all</button>
+  <span id="coordReadout">— , —</span>
+  <span id="itemCount">0 markers</span>
+</div>
+<div id="mapArea">
+  <div id="mosaicWrap">
+    <div id="mosaicStack">
+      <canvas id="mosaicBase"></canvas>
+      <canvas id="mosaicOverlay"></canvas>
+      <canvas id="detectionsCanvas"></canvas>
+      <canvas id="tacticalCanvas"></canvas>
+    </div>
+  </div>
+  <div id="videoPip">
+    <div id="videoPipHeader">
+      <span class="title">📹 Live Feed</span>
+      <button id="pipMinBtn" title="Minimize/Restore">–</button>
+      <button id="pipCloseBtn" title="Hide">✕</button>
+    </div>
+    <video id="vid" controls></video>
+  </div>
+</div>
+
+<script>
+function showError(msg) {
+  const el = document.getElementById('errBanner');
+  el.style.display = 'block';
+  el.textContent = '⚠ Error: ' + msg;
+}
+window.addEventListener('error', (e) => showError(e.message));
+
+// ===== EMBEDDED_STREAMS_DATA_PLACEHOLDER =====
+// Filled in by scripts/package.py: one entry per video the system knows
+// about, built by merging streams/manifest.json (id/label/video path) with
+// that stream's own streams/<id>/data.json (mosaic_width/height + samples)
+// and streams/<id>/detections.json (vehicle detections, if present). This
+// is what makes the shipped app support MULTIPLE videos out of one
+// template instead of one HTML file being baked per video -- adding a new
+// video to the system is "run pipeline/build_stream.py, then re-run
+// scripts/package.py", nothing in this file needs to change by hand.
+const STREAMS = [{"id":"placeholder","label":"placeholder","video":"placeholder.mp4","mosaic_width":100,"mosaic_height":100,"samples":[{"t":0,"m":[1,0,0,1,0,0],"center":[50,50]}],"detections":[]}];
+// ===== END_EMBEDDED_STREAMS_DATA_PLACEHOLDER =====
+
+const base = document.getElementById('mosaicBase');
+const overlay = document.getElementById('mosaicOverlay');
+const detCanvas = document.getElementById('detectionsCanvas');
+const tactical = document.getElementById('tacticalCanvas');
+const stack = document.getElementById('mosaicStack');
+const bctx = base.getContext('2d');
+const octx = overlay.getContext('2d');
+const dctx = detCanvas.getContext('2d');
+const tctx = tactical.getContext('2d');
+// Base canvas starts fully TRANSPARENT (not filled with a color) -- unpainted
+// mosaic area is shown by the dark CSS background behind it instead. This is
+// what makes the "paint only empty ground" compositing below possible: an
+// unpainted pixel must have alpha=0, not just "look dark".
+
+// `samples` and `activeStream` point at whichever stream is currently
+// selected -- loadStream() below reassigns them (and everything that
+// depends on the stream: canvas size, video src, zoom/pan, tactical layer
+// storage key). Every other function in this file (interpAt, tick, the
+// tactical tools, ...) reads through these two variables rather than a
+// fixed embedded dataset, which is what lets one HTML file serve any
+// number of streams.
+let activeStream = null;
+let samples = [];
+
+function interpAt(t) {
+  if (t <= samples[0].t) return samples[0];
+  if (t >= samples[samples.length - 1].t) return samples[samples.length - 1];
+  let lo = 0, hi = samples.length - 1;
+  while (hi - lo > 1) {
+    const mid = (lo + hi) >> 1;
+    if (samples[mid].t <= t) lo = mid; else hi = mid;
+  }
+  const A = samples[lo], B = samples[hi];
+  const alpha = (t - A.t) / (B.t - A.t || 1);
+  const lerp = (a, b) => a + (b - a) * alpha;
+  const m = A.m.map((v, i) => lerp(v, B.m[i]));
+  const center = [lerp(A.center[0], B.center[0]), lerp(A.center[1], B.center[1])];
+  return { t, m, center };
+}
+
+// ---- edge feathering ----------------------------------------------------
+// Each frame is composited with an alpha mask that's opaque in the center
+// and fades out near its edges, so neighboring frames blend instead of
+// leaving hard seam lines. The margin is kept narrow so a moving object
+// (like a car) doesn't get double-drawn as a ghost across two passes.
+const FEATHER_MARGIN_FRAC = 0.02; // keep in sync with pipeline/render_preview.py
+let featherMaskCanvas = null;
+let offCanvas = null, offCtx = null;
+
+function buildFeatherMask(w, h, marginFrac) {
+  const c = document.createElement('canvas');
+  c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  const mx = w * marginFrac, my = h * marginFrac;
+
+  ctx.fillStyle = 'rgba(0,0,0,1)';
+  ctx.fillRect(0, 0, w, h); // start fully opaque everywhere
+
+  ctx.globalCompositeOperation = 'destination-in';
+  // Each pass multiplies the current alpha by a gradient that fades to 0 at
+  // one edge and is clamped to fully opaque beyond its own margin, so it
+  // only affects that edge's band and leaves the rest of the mask alone.
+  const edges = [
+    [ctx.createLinearGradient(0, 0, mx, 0), 0, 0, w, h],
+    [ctx.createLinearGradient(w, 0, w - mx, 0), 0, 0, w, h],
+    [ctx.createLinearGradient(0, 0, 0, my), 0, 0, w, h],
+    [ctx.createLinearGradient(0, h, 0, h - my), 0, 0, w, h],
+  ];
+  for (const [g, x, y, gw, gh] of edges) {
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(1, 'rgba(0,0,0,1)');
+    ctx.fillStyle = g;
+    ctx.fillRect(x, y, gw, gh);
+  }
+  ctx.globalCompositeOperation = 'source-over';
+  return c;
+}
+
+function fmtTime(s) {
+  s = Math.max(0, s | 0);
+  return String((s / 60) | 0).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+}
+
+let follow = true;
+document.getElementById('followBtn').onclick = (e) => {
+  follow = !follow;
+  e.target.textContent = follow ? '📍 Follow position: On' : '📍 Follow position: Off';
+};
+document.getElementById('resetBtn').onclick = () => {
+  bctx.clearRect(0, 0, base.width, base.height);
+  drawnCount = 0;
+  // The mosaic just went blank, so any detections that were only "revealed"
+  // because their ground had been painted are no longer honestly shown --
+  // clear the reveal state too. If playback is already past a detection's
+  // t_reveal, tick() below will bring it straight back on the very next
+  // frame it draws (same limitation the mosaic itself already has: neither
+  // repaints ground from before the reset until playback reaches it again).
+  detRevealPtr = 0;
+  revealedDetIds.clear();
+  renderDetections();
+  document.getElementById('progressLabel').textContent = '0 frames drawn';
+};
+
+// ===========================================================================
+// Map panning with the middle mouse button (mouse3)
+// ===========================================================================
+// The left button is reserved for the tactical tools (placing markers,
+// select/move, drawing...), so panning is bound to a different button --
+// it works regardless of which tool is currently selected (Select, Marker,
+// Line, ...), just like the middle-click-drag pan habit in real map/CAD
+// applications. Listened for on mapArea so it doesn't matter which of the
+// tactical/overlay/base canvases happens to be on top (mousedown already
+// bubbles upward).
+let panDrag = null;
+document.getElementById('mapArea').addEventListener('mousedown', (e) => {
+  if (e.button !== 1) return; // middle button only
+  const wrap = document.getElementById('mosaicWrap');
+  panDrag = { startX: e.clientX, startY: e.clientY, scrollLeft: wrap.scrollLeft, scrollTop: wrap.scrollTop };
+  // Turn off "follow position" as soon as a manual pan starts -- if left on,
+  // it would keep pulling the view back toward the drone's position every
+  // animation frame, fighting the drag. The user can turn it back on from
+  // the toolbar button.
+  if (follow) {
+    follow = false;
+    document.getElementById('followBtn').textContent = '📍 Follow position: Off';
+  }
+  wrap.classList.add('panning');
+  e.preventDefault(); // block the browser's built-in middle-click autoscroll icon
+});
+window.addEventListener('mousemove', (e) => {
+  if (!panDrag) return;
+  const wrap = document.getElementById('mosaicWrap');
+  wrap.scrollLeft = panDrag.scrollLeft - (e.clientX - panDrag.startX);
+  wrap.scrollTop = panDrag.scrollTop - (e.clientY - panDrag.startY);
+});
+window.addEventListener('mouseup', (e) => {
+  if (e.button === 1 && panDrag) {
+    panDrag = null;
+    document.getElementById('mosaicWrap').classList.remove('panning');
+  }
+});
+// Suppress the "enter autoscroll mode" / middle-click-paste behavior some
+// browsers trigger on middle-button release.
+document.getElementById('mapArea').addEventListener('auxclick', (e) => { if (e.button === 1) e.preventDefault(); });
+
+// ===========================================================================
+// Mouse-wheel zoom: the point under the cursor stays fixed. Toolbar buttons
+// zoom around the center of the visible area instead. mosaicCoords() works
+// off the ratio between the canvas's rendered box and its pixel size, so
+// clicks stay correct at any zoom level without extra conversion.
+// ===========================================================================
+const ZOOM_MIN = 0.15, ZOOM_MAX = 6;
+let zoom = 1;
+
+function setZoom(newZoom, anchorClientX, anchorClientY) {
+  const wrap = document.getElementById('mosaicWrap');
+  newZoom = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, newZoom));
+  if (newZoom === zoom) return;
+  const wrapRect = wrap.getBoundingClientRect();
+  // If no cursor position was given (e.g. called from a toolbar button), use
+  // the center of the visible area instead, so zoom doesn't jump to a corner.
+  const ax = anchorClientX != null ? anchorClientX - wrapRect.left : wrap.clientWidth / 2;
+  const ay = anchorClientY != null ? anchorClientY - wrapRect.top : wrap.clientHeight / 2;
+  // The content-pixel position (post-transform) of the point under the
+  // cursor, BEFORE the change.
+  const contentX = wrap.scrollLeft + ax;
+  const contentY = wrap.scrollTop + ay;
+  const ratio = newZoom / zoom;
+  zoom = newZoom;
+  stack.style.transform = 'scale(' + zoom + ')';
+  wrap.scrollLeft = contentX * ratio - ax;
+  wrap.scrollTop = contentY * ratio - ay;
+  document.getElementById('zoomLabel').textContent = Math.round(zoom * 100) + '%';
+}
+
+document.getElementById('mapArea').addEventListener('wheel', (e) => {
+  if (e.target.closest('#videoPip')) return; // don't zoom the map while over the video window
+  e.preventDefault();
+  const factor = Math.exp(-e.deltaY * 0.0018);
+  setZoom(zoom * factor, e.clientX, e.clientY);
+}, { passive: false });
+
+document.getElementById('zoomInBtn').onclick = () => setZoom(zoom * 1.3);
+document.getElementById('zoomOutBtn').onclick = () => setZoom(zoom / 1.3);
+document.getElementById('zoomResetBtn').onclick = () => setZoom(1);
+
+const vid = document.getElementById('vid');
+let lastDrawnT = -999;
+let drawnCount = 0;
+
+function tick() {
+  const t = vid.currentTime;
+  const s = interpAt(t);
+  const [a, b, c, d, e, f] = s.m;
+
+  // Draw the current video frame onto the accumulator, warped into mosaic
+  // space, with feathered edges (see buildFeatherMask above) so it blends
+  // softly into whatever's already there instead of cutting a hard seam.
+  if (!vid.paused && !vid.ended && Math.abs(t - lastDrawnT) > 0.02) {
+    try {
+      if (!offCanvas) {
+        offCanvas = document.createElement('canvas');
+        offCanvas.width = vid.videoWidth;
+        offCanvas.height = vid.videoHeight;
+        offCtx = offCanvas.getContext('2d', { willReadFrequently: false });
+        featherMaskCanvas = buildFeatherMask(vid.videoWidth, vid.videoHeight, FEATHER_MARGIN_FRAC);
+      }
+      // 1) draw the frame at full opacity into the offscreen buffer
+      offCtx.globalCompositeOperation = 'source-over';
+      offCtx.drawImage(vid, 0, 0, vid.videoWidth, vid.videoHeight);
+      // 2) punch the feather mask's alpha into it (opaque center, fading edges)
+      offCtx.globalCompositeOperation = 'destination-in';
+      offCtx.drawImage(featherMaskCanvas, 0, 0);
+      offCtx.globalCompositeOperation = 'source-over';
+      // 3) composite the now edge-feathered frame onto the mosaic, warped
+      bctx.setTransform(a, b, c, d, e, f);
+      bctx.imageSmoothingEnabled = true;
+      bctx.drawImage(offCanvas, 0, 0);
+      bctx.setTransform(1, 0, 0, 1, 0, 0);
+    } catch (err) { /* video not ready yet */ }
+    lastDrawnT = t;
+    drawnCount++;
+    document.getElementById('progressLabel').textContent = drawnCount + ' frames drawn';
+
+    // Reveal any detections whose ground has JUST been painted -- see
+    // revealDetectionsUpTo() (in the "detected vehicles" section below) for
+    // why this is gated on the exact same "a frame was actually just
+    // drawn" condition as the mosaic paint above, rather than running on
+    // every animation frame.
+    revealDetectionsUpTo(t);
+  }
+
+  // live position marker on the overlay (always redrawn, cheap)
+  octx.clearRect(0, 0, overlay.width, overlay.height);
+  octx.beginPath();
+  octx.arc(s.center[0], s.center[1], 10, 0, Math.PI * 2);
+  octx.strokeStyle = '#ff4d4d';
+  octx.lineWidth = 3;
+  octx.stroke();
+  octx.beginPath();
+  octx.arc(s.center[0], s.center[1], 3, 0, Math.PI * 2);
+  octx.fillStyle = '#ff4d4d';
+  octx.fill();
+
+  if (follow) {
+    const wrap = document.getElementById('mosaicWrap');
+    // scrollLeft/scrollTop are in post-zoom (rendered) pixels, so the drone's
+    // mosaic-pixel center has to be scaled by the current zoom level too --
+    // otherwise "follow" would drift off-target at any zoom other than 100%.
+    const targetLeft = s.center[0] * zoom - wrap.clientWidth / 2;
+    const targetTop = s.center[1] * zoom - wrap.clientHeight / 2;
+    wrap.scrollLeft += (targetLeft - wrap.scrollLeft) * 0.08;
+    wrap.scrollTop += (targetTop - wrap.scrollTop) * 0.08;
+  }
+
+  document.getElementById('clock').textContent = fmtTime(t) + ' / ' + fmtTime(vid.duration || 0);
+  requestAnimationFrame(tick);
+}
+
+// ===========================================================================
+// Live video: a small, draggable, resizable floating window (picture-in-
+// picture style) -- no longer a fixed panel permanently occupying half the
+// screen, but a box that floats OVER the map. The map uses the entire
+// viewport; the video can be dragged corner to corner, resized via its own
+// corner handle (native CSS `resize`), collapsed to just its title bar with
+// the header's "–", or hidden entirely with "✕" and brought back from the
+// "🎥 Video" button in the toolbar.
+// ===========================================================================
+const videoPip = document.getElementById('videoPip');
+const pipHeader = document.getElementById('videoPipHeader');
+const mapArea = document.getElementById('mapArea');
+
+let pipDrag = null;
+pipHeader.addEventListener('mousedown', (e) => {
+  if (e.target.tagName === 'BUTTON') return; // don't start a drag from the header's own buttons
+  const rect = videoPip.getBoundingClientRect();
+  pipDrag = { dx: e.clientX - rect.left, dy: e.clientY - rect.top };
+  // switch from the initial bottom/left CSS anchoring to explicit left/top
+  // so the drag can move it freely from here on.
+  videoPip.style.left = rect.left - mapArea.getBoundingClientRect().left + 'px';
+  videoPip.style.top = rect.top - mapArea.getBoundingClientRect().top + 'px';
+  videoPip.style.bottom = 'auto';
+  e.preventDefault();
+});
+window.addEventListener('mousemove', (e) => {
+  if (!pipDrag) return;
+  const mapRect = mapArea.getBoundingClientRect();
+  let nx = e.clientX - pipDrag.dx - mapRect.left;
+  let ny = e.clientY - pipDrag.dy - mapRect.top;
+  nx = Math.max(0, Math.min(nx, mapRect.width - videoPip.offsetWidth));
+  ny = Math.max(0, Math.min(ny, mapRect.height - videoPip.offsetHeight));
+  videoPip.style.left = nx + 'px';
+  videoPip.style.top = ny + 'px';
+});
+window.addEventListener('mouseup', () => { pipDrag = null; });
+
+let pipMinimized = false;
+document.getElementById('pipMinBtn').onclick = () => {
+  pipMinimized = !pipMinimized;
+  videoPip.classList.toggle('minimized', pipMinimized);
+  document.getElementById('pipMinBtn').textContent = pipMinimized ? '▢' : '–';
+};
+document.getElementById('pipCloseBtn').onclick = () => {
+  videoPip.classList.add('hidden');
+  document.getElementById('videoToggleBtn').textContent = '🎥 Video: Hidden';
+};
+document.getElementById('videoToggleBtn').onclick = () => {
+  const hidden = videoPip.classList.toggle('hidden');
+  document.getElementById('videoToggleBtn').textContent = hidden ? '🎥 Video: Hidden' : '🎥 Video: Visible';
+};
+
+// ===========================================================================
+// Detected vehicles layer
+// ===========================================================================
+// pipeline/detect_objects.py scans the video frame by frame in time order.
+// Each detection is stamped with t_reveal (timestamp of first sighting),
+// embedded into the stream data alongside the mosaic samples.
+//
+// Playback reveals a detection only once the video reaches its t_reveal, so
+// a box appears at the same moment its patch of ground does.
+//
+// Detections live in their own canvas/data structure, separate from the
+// user's tactical markers -- "Clear all" never touches them. The user can
+// remove a detection that looks wrong (see the edit-mode block below),
+// tracked in its own per-stream storage.
+//
+// Detection quality is not perfect: the same vehicle can occasionally be
+// logged as more than one nearby detection. The pipeline defaults to the
+// "car" class only since it's the most reliable; DET_COLORS/DET_LABELS
+// below still cover every class in case a stream is regenerated with other
+// classes included. Labels show the confidence score, and "Remove false
+// detections" mode lets the user clean up anything the model got wrong.
+let activeDetections = [];   // this stream's detections, sorted by t_reveal ascending
+let detRevealPtr = 0;        // index of the next not-yet-revealed detection
+let revealedDetIds = new Set();  // ids revealed so far during this playback
+let removedDetIds = new Set();   // ids the user has removed (persisted per stream)
+let showDetections = true;
+let detEditMode = false;
+let REMOVED_DET_KEY = '';
+
+const DET_COLORS = {
+  car: '#4ade80', van: '#facc15', truck: '#f87171', bus: '#38bdf8', motor: '#e879f9',
+  pedestrian: '#fb923c', people: '#fb923c', bicycle: '#a3e635',
+  tricycle: '#c084fc', 'awning-tricycle': '#c084fc',
+};
+const DET_LABELS = {
+  car: 'Car', van: 'Van', truck: 'Truck', bus: 'Bus', motor: 'Motorcycle',
+  pedestrian: 'Pedestrian', people: 'Person', bicycle: 'Bicycle',
+  tricycle: 'Tricycle', 'awning-tricycle': 'Awning-tricycle',
+};
+
+function loadRemovedDetections() {
+  removedDetIds = new Set();
+  try {
+    const raw = localStorage.getItem(REMOVED_DET_KEY);
+    if (raw) {
+      const arr = JSON.parse(raw);
+      if (Array.isArray(arr)) removedDetIds = new Set(arr);
+    }
+  } catch (err) { /* localStorage unavailable -- start empty, session-only */ }
+}
+function saveRemovedDetections() {
+  try { localStorage.setItem(REMOVED_DET_KEY, JSON.stringify(Array.from(removedDetIds))); } catch (err) { /* best-effort only */ }
+}
+
+// Advances detRevealPtr/revealedDetIds up through every detection whose
+// t_reveal has now been reached, re-rendering once if anything changed.
+// Pulled out of tick() as its own function (rather than inlined) so it can
+// also be called directly and deterministically -- from a test, or from
+// anywhere else that needs to simulate "playback has reached time t"
+// without depending on this environment's video decode support, the same
+// way interpAt() already lets tests exercise the mosaic-transform math
+// without real video playback.
+function revealDetectionsUpTo(t) {
+  let revealedSomething = false;
+  while (detRevealPtr < activeDetections.length && activeDetections[detRevealPtr].t_reveal <= t) {
+    const det = activeDetections[detRevealPtr];
+    if (!removedDetIds.has(det.id)) revealedDetIds.add(det.id);
+    detRevealPtr++;
+    revealedSomething = true;
+  }
+  if (revealedSomething) renderDetections();
+}
+
+function renderDetections() {
+  dctx.clearRect(0, 0, detCanvas.width, detCanvas.height);
+  let shown = 0;
+  for (const d of activeDetections) {
+    if (!revealedDetIds.has(d.id) || removedDetIds.has(d.id)) continue;
+    shown++;
+    if (!showDetections) continue;
+    const color = DET_COLORS[d.class] || '#e5e7eb';
+    dctx.save();
+    dctx.strokeStyle = color;
+    dctx.lineWidth = 2;
+    dctx.setLineDash([5, 3]);
+    // d.x, d.y is the box's TOP-LEFT corner (not a center point) -- see
+    // pipeline/detect_objects.py's own docstring for this convention.
+    dctx.strokeRect(d.x, d.y, d.w, d.h);
+    dctx.setLineDash([]);
+    const label = (DET_LABELS[d.class] || d.class) + ' ' + Math.round(d.conf * 100) + '%';
+    dctx.font = 'bold 11px Courier New, monospace';
+    dctx.strokeStyle = '#000'; dctx.lineWidth = 3;
+    dctx.strokeText(label, d.x, d.y - 4);
+    dctx.fillStyle = color;
+    dctx.fillText(label, d.x, d.y - 4);
+    dctx.restore();
+  }
+  const total = activeDetections.filter(d => !removedDetIds.has(d.id)).length;
+  document.getElementById('detCountLabel').textContent = '(' + shown + '/' + total + ')';
+  document.getElementById('detRestoreBtn').textContent = '↺ Restore removed (' + removedDetIds.size + ')';
+}
+
+document.getElementById('detToggleBtn').onclick = (e) => {
+  showDetections = !showDetections;
+  e.target.textContent = showDetections ? '🚗 Detected vehicles: On' : '🚗 Detected vehicles: Off';
+  renderDetections();
+};
+
+// ---- "remove false detections" mode: click a revealed, visible box to
+// remove it. A dedicated mode (rather than always-on) so it never collides
+// with placing tactical markers/lines/etc. near a detection box -- see the
+// guards added at the top of the tactical canvas's own mousedown/click/
+// dblclick handlers further down.
+function hitTestDetection(x, y) {
+  let bestId = null, bestArea = Infinity;
+  const pad = 3; // a little slack around the box, easier to click precisely
+  for (const d of activeDetections) {
+    if (!revealedDetIds.has(d.id) || removedDetIds.has(d.id)) continue;
+    if (x >= d.x - pad && x <= d.x + d.w + pad && y >= d.y - pad && y <= d.y + d.h + pad) {
+      const area = d.w * d.h;
+      if (area < bestArea) { bestArea = area; bestId = d.id; } // smallest match wins, for overlapping boxes
+    }
+  }
+  return bestId;
+}
+
+document.getElementById('detEditBtn').onclick = (e) => {
+  detEditMode = !detEditMode;
+  e.target.textContent = detEditMode ? '🗑️ Remove false detections: On' : '🗑️ Remove false detections: Off';
+  tactical.classList.toggle('detEditMode', detEditMode);
+  if (detEditMode) {
+    // avoid a half-finished tactical drawing lingering visually while in
+    // this mode
+    pendingPoints = null; freehandPoints = null;
+    renderTactical();
+  }
+};
+document.getElementById('detRestoreBtn').onclick = () => {
+  if (!removedDetIds.size) return;
+  removedDetIds.clear();
+  saveRemovedDetections();
+  renderDetections();
+};
+
+// ===========================================================================
+// Tactical drawing / markup layer (ATAK-like)
+// ===========================================================================
+// A separate canvas (#tacticalCanvas) layered above the mosaic, redrawn only
+// when the user adds/moves/removes something. It shares the mosaic's pixel
+// coordinate system, so it tracks pan/scroll automatically. Each stream's
+// markers are kept separate via STORAGE_KEY, set in loadStream().
+//
+// No real GPS/geographic referencing is used -- the grid is a local,
+// arbitrary reference (map-book-style A1/B2 cells) over the mosaic's own
+// pixel space, and the measuring tool reports pixel distance, not meters.
+
+let STORAGE_KEY = '';
+let tacticalItems = []; // {id, type:'marker'|'line'|'area'|'freehand'|'text'|'measure', ...}
+let nextId = 1;
+let selectedId = null;
+let currentTool = 'select';
+let currentAff = 'friendly';
+let showGrid = true;
+let pendingPoints = null;   // for line/area while being drawn
+let freehandPoints = null;  // for freehand while mouse is down
+let draggingItem = null;
+let dragStart = null;
+
+function loadTactical() {
+  tacticalItems = [];
+  nextId = 1;
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) tacticalItems = parsed;
+      nextId = 1 + tacticalItems.reduce((m, it) => Math.max(m, it.id || 0), 0);
+    }
+  } catch (err) { /* localStorage unavailable (e.g. some file:// contexts) -- start empty, session-only */ }
+}
+function saveTactical() {
+  try { localStorage.setItem(STORAGE_KEY, JSON.stringify(tacticalItems)); } catch (err) { /* best-effort only */ }
+}
+
+const AFF_COLORS = { friendly: '#3b82f6', hostile: '#ef4444', neutral: '#22c55e', unknown: '#eab308', poi: '#e5e7eb' };
+const AFF_LABELS = { friendly: 'Friendly', hostile: 'Hostile', neutral: 'Neutral', unknown: 'Unknown', poi: 'Point of interest' };
+
+function updateItemCount() {
+  document.getElementById('itemCount').textContent = tacticalItems.length + ' markers';
+}
+
+// ---- local reference grid (NOT real-world georeference, see note above) ----
+function drawGrid() {
+  const cell = 220; // mosaic px per grid cell -- purely visual/reference
+  tctx.save();
+  tctx.strokeStyle = 'rgba(120,180,120,0.18)';
+  tctx.lineWidth = 1;
+  tctx.font = '10px Courier New, monospace';
+  tctx.fillStyle = 'rgba(140,200,140,0.55)';
+  let col = 0;
+  for (let x = 0; x <= tactical.width; x += cell) {
+    tctx.beginPath(); tctx.moveTo(x + 0.5, 0); tctx.lineTo(x + 0.5, tactical.height); tctx.stroke();
+    col++;
+  }
+  let row = 0;
+  for (let y = 0; y <= tactical.height; y += cell) {
+    tctx.beginPath(); tctx.moveTo(0, y + 0.5); tctx.lineTo(tactical.width, y + 0.5); tctx.stroke();
+    row++;
+  }
+  col = 0;
+  for (let x = 0; x < tactical.width; x += cell) {
+    row = 0;
+    const colLabel = String.fromCharCode(65 + (col % 26));
+    for (let y = 0; y < tactical.height; y += cell) {
+      tctx.fillText(colLabel + (row + 1), x + 4, y + 12);
+      row++;
+    }
+    col++;
+  }
+  tctx.restore();
+}
+
+function distToSegment(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1;
+  const len2 = dx * dx + dy * dy;
+  let t = len2 === 0 ? 0 : ((px - x1) * dx + (py - y1) * dy) / len2;
+  t = Math.max(0, Math.min(1, t));
+  const cx = x1 + t * dx, cy = y1 + t * dy;
+  return Math.hypot(px - cx, py - cy);
+}
+function pointInPolygon(px, py, pts) {
+  let inside = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i], [xj, yj] = pts[j];
+    if (((yi > py) !== (yj > py)) && (px < (xj - xi) * (py - yi) / (yj - yi) + xi)) inside = !inside;
+  }
+  return inside;
+}
+
+function drawMarker(m, selected) {
+  const { x, y, aff, label } = m;
+  const R = 14;
+  tctx.save();
+  tctx.translate(x, y);
+  tctx.lineWidth = 2;
+  tctx.strokeStyle = '#0a0d0a';
+  tctx.fillStyle = AFF_COLORS[aff] || AFF_COLORS.poi;
+  switch (aff) {
+    case 'friendly': // NATO-style rectangle = friendly
+      tctx.beginPath(); tctx.rect(-R, -R * 0.68, R * 2, R * 1.36); tctx.fill(); tctx.stroke(); break;
+    case 'hostile': // diamond = hostile
+      tctx.beginPath(); tctx.moveTo(0, -R); tctx.lineTo(R, 0); tctx.lineTo(0, R); tctx.lineTo(-R, 0); tctx.closePath(); tctx.fill(); tctx.stroke(); break;
+    case 'neutral': // square = neutral
+      tctx.beginPath(); tctx.rect(-R * 0.8, -R * 0.8, R * 1.6, R * 1.6); tctx.fill(); tctx.stroke(); break;
+    case 'unknown': // dashed circle = unknown
+      tctx.setLineDash([4, 3]);
+      tctx.beginPath(); tctx.arc(0, 0, R, 0, Math.PI * 2); tctx.fill(); tctx.stroke();
+      tctx.setLineDash([]); break;
+    default: // plain pin = point of interest / no affiliation
+      tctx.beginPath(); tctx.arc(0, 0, R * 0.6, 0, Math.PI * 2); tctx.fill(); tctx.stroke();
+  }
+  tctx.restore();
+  if (selected) {
+    tctx.save();
+    tctx.strokeStyle = '#ffb020'; tctx.lineWidth = 2;
+    tctx.beginPath(); tctx.arc(x, y, R + 7, 0, Math.PI * 2); tctx.stroke();
+    tctx.restore();
+  }
+  if (label) {
+    tctx.font = 'bold 12px system-ui, Arial';
+    tctx.strokeStyle = '#000'; tctx.lineWidth = 3;
+    tctx.strokeText(label, x + R + 5, y + 4);
+    tctx.fillStyle = '#fff';
+    tctx.fillText(label, x + R + 5, y + 4);
+  }
+}
+
+function drawPathItem(item, selected) {
+  const pts = item.points;
+  if (!pts || pts.length < 2) return;
+  tctx.save();
+  tctx.lineWidth = selected ? 4 : 2.5;
+  tctx.strokeStyle = item.color || '#ffb020';
+  tctx.lineJoin = 'round'; tctx.lineCap = 'round';
+  if (item.type === 'measure') tctx.setLineDash([7, 5]);
+  tctx.beginPath();
+  tctx.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) tctx.lineTo(pts[i][0], pts[i][1]);
+  if (item.type === 'area' && pts.length > 2) {
+    tctx.closePath();
+    tctx.fillStyle = (item.color || '#ffb020') + '30';
+    tctx.fill();
+  }
+  tctx.stroke();
+  tctx.restore();
+  if (item.type === 'measure' && pts.length >= 2) {
+    const [x0, y0] = pts[0], [x1, y1] = pts[pts.length - 1];
+    const dist = Math.hypot(x1 - x0, y1 - y0);
+    const mx = (x0 + x1) / 2, my = (y0 + y1) / 2;
+    const txt = Math.round(dist) + ' px (mosaic scale, not real-world distance)';
+    tctx.save();
+    tctx.font = 'bold 11px Courier New, monospace';
+    tctx.strokeStyle = '#000'; tctx.lineWidth = 3;
+    tctx.strokeText(txt, mx + 6, my - 6);
+    tctx.fillStyle = '#fff';
+    tctx.fillText(txt, mx + 6, my - 6);
+    tctx.restore();
+  }
+}
+
+function drawTextItem(item, selected) {
+  tctx.save();
+  tctx.font = '14px system-ui, Arial';
+  tctx.strokeStyle = '#000'; tctx.lineWidth = 3;
+  tctx.strokeText(item.text, item.x, item.y);
+  tctx.fillStyle = item.color || '#fff';
+  tctx.fillText(item.text, item.x, item.y);
+  if (selected) {
+    const wpx = tctx.measureText(item.text).width;
+    tctx.strokeStyle = '#ffb020'; tctx.lineWidth = 1.5;
+    tctx.strokeRect(item.x - 4, item.y - 16, wpx + 8, 22);
+  }
+  tctx.restore();
+}
+
+function renderTactical() {
+  tctx.clearRect(0, 0, tactical.width, tactical.height);
+  if (showGrid) drawGrid();
+  for (const item of tacticalItems) {
+    const sel = item.id === selectedId;
+    if (item.type === 'marker') drawMarker(item, sel);
+    else if (item.type === 'text') drawTextItem(item, sel);
+    else drawPathItem(item, sel);
+  }
+  // in-progress line/area preview
+  if (pendingPoints && pendingPoints.length) {
+    drawPathItem({ type: currentTool, points: pendingPoints, color: '#ffb020' }, false);
+  }
+  updateItemCount();
+}
+
+// ---- hit testing (topmost first) ----
+function hitTest(x, y) {
+  for (let i = tacticalItems.length - 1; i >= 0; i--) {
+    const it = tacticalItems[i];
+    if (it.type === 'marker') {
+      if (Math.hypot(x - it.x, y - it.y) <= 16) return it.id;
+    } else if (it.type === 'text') {
+      tctx.font = '14px system-ui, Arial';
+      const w = tctx.measureText(it.text).width;
+      if (x >= it.x - 4 && x <= it.x + w + 4 && y >= it.y - 16 && y <= it.y + 6) return it.id;
+    } else if (it.type === 'area' && it.points.length > 2) {
+      if (pointInPolygon(x, y, it.points)) return it.id;
+    } else if (it.points && it.points.length >= 2) {
+      for (let j = 0; j < it.points.length - 1; j++) {
+        const [x1, y1] = it.points[j], [x2, y2] = it.points[j + 1];
+        if (distToSegment(x, y, x1, y1, x2, y2) <= 6) return it.id;
+      }
+    }
+  }
+  return null;
+}
+
+// ---- toolbar wiring ----
+function setTool(tool) {
+  currentTool = tool;
+  pendingPoints = null; freehandPoints = null;
+  document.querySelectorAll('#toolButtons .tbtn').forEach(b => b.classList.toggle('active', b.dataset.tool === tool));
+  tactical.classList.toggle('toolSelect', tool === 'select');
+  tactical.classList.toggle('toolActive', tool !== 'select');
+  renderTactical();
+}
+document.querySelectorAll('#toolButtons .tbtn').forEach(b => {
+  b.onclick = () => setTool(b.dataset.tool);
+});
+document.querySelectorAll('#affilButtons .abtn').forEach(b => {
+  b.onclick = () => {
+    currentAff = b.dataset.aff;
+    document.querySelectorAll('#affilButtons .abtn').forEach(x => x.classList.toggle('active', x === b));
+  };
+});
+document.getElementById('gridBtn').onclick = (e) => {
+  showGrid = !showGrid;
+  e.target.textContent = showGrid ? '▦ Grid: On' : '▦ Grid: Off';
+  renderTactical();
+};
+document.getElementById('deleteBtn').onclick = () => deleteSelected();
+document.getElementById('clearAllBtn').onclick = () => {
+  if (!tacticalItems.length) return;
+  if (confirm('Delete all tactical markings? This cannot be undone.')) {
+    tacticalItems = []; selectedId = null;
+    saveTactical(); renderTactical();
+  }
+};
+
+function deleteSelected() {
+  if (selectedId == null) return;
+  tacticalItems = tacticalItems.filter(it => it.id !== selectedId);
+  selectedId = null;
+  saveTactical(); renderTactical();
+}
+
+function mosaicCoords(e) {
+  const rect = tactical.getBoundingClientRect();
+  const sx = tactical.width / rect.width, sy = tactical.height / rect.height;
+  return [(e.clientX - rect.left) * sx, (e.clientY - rect.top) * sy];
+}
+
+tactical.addEventListener('mousemove', (e) => {
+  const [x, y] = mosaicCoords(e);
+  document.getElementById('coordReadout').textContent = Math.round(x) + ' , ' + Math.round(y);
+  if (detEditMode) return; // no drag/rubber-band previews while in delete mode
+
+  if (draggingItem) {
+    draggingItem.x = x - dragStart.dx;
+    draggingItem.y = y - dragStart.dy;
+    renderTactical();
+    return;
+  }
+  if (freehandPoints) {
+    freehandPoints.push([x, y]);
+    renderTactical();
+    if (freehandPoints.length > 1) {
+      tctx.save();
+      tctx.strokeStyle = '#ffb020';
+      tctx.lineWidth = 2.5;
+      tctx.lineJoin = 'round'; tctx.lineCap = 'round';
+      tctx.beginPath();
+      tctx.moveTo(freehandPoints[0][0], freehandPoints[0][1]);
+      for (let i = 1; i < freehandPoints.length; i++) tctx.lineTo(freehandPoints[i][0], freehandPoints[i][1]);
+      tctx.stroke();
+      tctx.restore();
+    }
+    return;
+  }
+  if (pendingPoints && pendingPoints.length && (currentTool === 'line' || currentTool === 'area' || currentTool === 'measure')) {
+    renderTactical();
+    // live rubber-band segment to cursor
+    const last = pendingPoints[pendingPoints.length - 1];
+    tctx.save();
+    tctx.strokeStyle = '#ffb02090'; tctx.lineWidth = 1.5; tctx.setLineDash([4, 4]);
+    tctx.beginPath(); tctx.moveTo(last[0], last[1]); tctx.lineTo(x, y); tctx.stroke();
+    tctx.restore();
+  }
+});
+
+tactical.addEventListener('mousedown', (e) => {
+  if (e.button !== 0) return; // middle/right click not handled here -- middle click pans the map
+  const [x, y] = mosaicCoords(e);
+  if (detEditMode) {
+    const hit = hitTestDetection(x, y);
+    if (hit) {
+      removedDetIds.add(hit);
+      saveRemovedDetections();
+      renderDetections();
+    }
+    return;
+  }
+  if (currentTool === 'select') {
+    const hit = hitTest(x, y);
+    selectedId = hit;
+    if (hit != null) {
+      const it = tacticalItems.find(o => o.id === hit);
+      if (it && (it.type === 'marker' || it.type === 'text')) {
+        draggingItem = it;
+        dragStart = { dx: x - it.x, dy: y - it.y };
+      }
+    }
+    renderTactical();
+  } else if (currentTool === 'freehand') {
+    freehandPoints = [[x, y]];
+  }
+});
+
+tactical.addEventListener('mouseup', () => {
+  if (draggingItem) { saveTactical(); draggingItem = null; dragStart = null; }
+  if (freehandPoints) {
+    if (freehandPoints.length > 1) {
+      tacticalItems.push({ id: nextId++, type: 'freehand', points: freehandPoints, color: '#ffb020' });
+      saveTactical();
+    }
+    freehandPoints = null;
+    renderTactical();
+  }
+});
+
+tactical.addEventListener('click', (e) => {
+  if (detEditMode) return; // handled entirely in mousedown above
+  const [x, y] = mosaicCoords(e);
+  if (currentTool === 'marker') {
+    tacticalItems.push({ id: nextId++, type: 'marker', x, y, aff: currentAff, label: '' });
+    saveTactical(); renderTactical();
+  } else if (currentTool === 'text') {
+    const txt = prompt('Enter text:');
+    if (txt) {
+      tacticalItems.push({ id: nextId++, type: 'text', x, y, text: txt, color: '#fff' });
+      saveTactical(); renderTactical();
+    }
+  } else if (currentTool === 'line' || currentTool === 'area') {
+    if (!pendingPoints) pendingPoints = [];
+    pendingPoints.push([x, y]);
+    renderTactical();
+  } else if (currentTool === 'measure') {
+    if (!pendingPoints) pendingPoints = [];
+    pendingPoints.push([x, y]);
+    if (pendingPoints.length === 2) {
+      tacticalItems.push({ id: nextId++, type: 'measure', points: pendingPoints, color: '#ffb020' });
+      pendingPoints = null;
+      saveTactical();
+    }
+    renderTactical();
+  }
+});
+
+function dedupeTrailingPoints(pts) {
+  // A double-click fires two 'click' events (at ~the same spot) before the
+  // 'dblclick' event -- both already pushed a vertex via the click handler
+  // below, so by the time we get here the last 1-2 points are near-duplicates
+  // of the intended finishing point. Collapse consecutive points that are
+  // within a couple pixels of each other so the finished shape doesn't carry
+  // redundant vertices at its last corner.
+  const out = [];
+  for (const p of pts) {
+    if (!out.length || Math.hypot(p[0] - out[out.length - 1][0], p[1] - out[out.length - 1][1]) > 2) out.push(p);
+  }
+  return out;
+}
+
+tactical.addEventListener('dblclick', (e) => {
+  e.preventDefault();
+  if (detEditMode) return;
+  if ((currentTool === 'line' || currentTool === 'area') && pendingPoints) {
+    const finalPts = dedupeTrailingPoints(pendingPoints);
+    if (finalPts.length >= 2) {
+      tacticalItems.push({ id: nextId++, type: currentTool, points: finalPts, color: '#ffb020' });
+    }
+    pendingPoints = null;
+    saveTactical(); renderTactical();
+  } else if (currentTool === 'select') {
+    const [x, y] = mosaicCoords(e);
+    const hit = hitTest(x, y);
+    if (hit != null) {
+      const it = tacticalItems.find(o => o.id === hit);
+      if (it && (it.type === 'marker' || it.type === 'text')) {
+        const cur = it.label !== undefined ? it.label : it.text;
+        const val = prompt('Label / text:', cur || '');
+        if (val !== null) {
+          if (it.type === 'marker') it.label = val; else it.text = val;
+          saveTactical(); renderTactical();
+        }
+      }
+    }
+  }
+});
+
+window.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    pendingPoints = null; freehandPoints = null; renderTactical();
+  } else if ((e.key === 'Delete' || e.key === 'Backspace') && selectedId != null) {
+    // avoid stealing Backspace while any text field might be focused (none exist here besides prompt(), which blocks input anyway)
+    deleteSelected();
+  }
+});
+
+// ===========================================================================
+// Stream picker
+// ===========================================================================
+// Every entry in the STREAMS array is an independent flight/video, with its
+// own mosaic size, sample track, and tactical-marker storage key.
+// loadStream() resets the video source, canvas sizes, mosaic paint state,
+// zoom/pan, feather buffers, detections, and tactical markers for the newly
+// selected stream.
+function loadStream(id) {
+  const s = STREAMS.find(x => x.id === id);
+  if (!s) return;
+  activeStream = s;
+  samples = s.samples;
+
+  base.width = overlay.width = detCanvas.width = tactical.width = s.mosaic_width;
+  base.height = overlay.height = detCanvas.height = tactical.height = s.mosaic_height;
+  stack.style.width = s.mosaic_width + 'px';
+  stack.style.height = s.mosaic_height + 'px';
+  drawnCount = 0;
+  lastDrawnT = -999;
+  document.getElementById('progressLabel').textContent = '0 frames drawn';
+
+  activeDetections = (s.detections || []).slice().sort((a, b) => a.t_reveal - b.t_reveal);
+  detRevealPtr = 0;
+  revealedDetIds = new Set();
+  REMOVED_DET_KEY = 'drone_removed_detections_v1_' + s.id;
+  loadRemovedDetections();
+  detEditMode = false;
+  document.getElementById('detEditBtn').textContent = '🗑️ Remove false detections: Off';
+  tactical.classList.remove('detEditMode');
+  renderDetections();
+
+  // Video frame size can differ between streams -- the old feather mask/
+  // offscreen buffer is now invalid, tick() will rebuild it on the next
+  // frame on its own (see the "if (!offCanvas)" block above).
+  featherMaskCanvas = null;
+  offCanvas = null; offCtx = null;
+
+  vid.pause();
+  vid.src = s.video;
+  vid.currentTime = 0;
+  vid.load();
+
+  zoom = 1;
+  stack.style.transform = 'scale(1)';
+  document.getElementById('zoomLabel').textContent = '100%';
+  const wrap = document.getElementById('mosaicWrap');
+  wrap.scrollLeft = 0; wrap.scrollTop = 0;
+
+  follow = true;
+  document.getElementById('followBtn').textContent = '📍 Follow position: On';
+
+  STORAGE_KEY = 'drone_tactical_v1_' + s.id;
+  selectedId = null; pendingPoints = null; freehandPoints = null; draggingItem = null; dragStart = null;
+  loadTactical();
+  renderTactical();
+
+  document.getElementById('videoTitle').textContent = 'Panorama Map — ' + s.label;
+  const sel = document.getElementById('streamSelect');
+  if (sel.value !== s.id) sel.value = s.id;
+}
+
+const streamSelectEl = document.getElementById('streamSelect');
+for (const s of STREAMS) {
+  const opt = document.createElement('option');
+  opt.value = s.id;
+  opt.textContent = s.label;
+  streamSelectEl.appendChild(opt);
+}
+streamSelectEl.onchange = () => loadStream(streamSelectEl.value);
+
+setTool('select');
+loadStream(STREAMS[0].id);
+requestAnimationFrame(tick);
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+# Normalise line endings: LF in the repository, native on checkout.
+* text=auto
+
+*.py    text
+*.html  text
+*.md    text
+*.json  text
+*.txt   text
+*.yml   text
+*.yaml  text
+
+# Binary assets
+*.onnx  binary
+*.pt    binary
+*.mp4   binary
+*.zip   binary
+*.png   binary
+*.jpg   binary

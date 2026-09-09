@@ -1,0 +1,40 @@
+# Sample flight videos: far above GitHub's 100 MB file limit.
+# See README "Sample videos" for where to download them.
+*.mp4
+*.mov
+*.avi
+*.mkv
+
+# Delivery / scratch artifacts
+Claude outputs/
+*.zip
+
+# PyTorch source weights: not used at runtime (the pipeline loads models/best.onnx).
+# Download from https://huggingface.co/mshamrai/yolov8n-visdrone if needed.
+models/best.pt
+
+# Rendered mosaic previews dropped at the project root
+/*.png
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+
+# Playwright / test artifacts
+test-results/
+playwright-report/
+
+# OS / editor
+.DS_Store
+Thumbs.db
+desktop.ini
+.vscode/
+.idea/
+*.swp
