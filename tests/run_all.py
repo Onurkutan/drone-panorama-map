@@ -21,7 +21,7 @@ UNIT_TESTS = [
 ]
 
 BROWSER_TESTS = [
-    "check_pageerror.py",
+    "test_pageerror.py",
     "test_tactical.py",
     "test_zoom.py",
     "test_stream_switch.py",

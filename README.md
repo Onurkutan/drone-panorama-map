@@ -61,18 +61,21 @@ drone mapping/
 │   └── package.py               <- builds index.html from the template + stream data
 ├── tests/
 │   ├── run_all.py                 <- runs all tests, prints a summary
+│   ├── conftest.py                <- pytest fixtures (packages a throwaway index.html)
 │   ├── unit/                      <- pure-function tests, no browser needed
 │   │   ├── test_detection_geometry.py
 │   │   ├── test_pose_graph.py
 │   │   ├── test_package.py
 │   │   └── test_causal_order.py
-│   ├── check_pageerror.py
+│   ├── test_pageerror.py
 │   ├── test_tactical.py
 │   ├── test_zoom.py
 │   ├── test_stream_switch.py
 │   └── test_detections.py
 ├── TESTING_STRATEGY.md
-└── requirements.txt
+├── pytest.ini
+├── requirements.txt
+└── requirements-dev.txt
 ```
 
 ## Why is there Python if only one HTML file ships?
@@ -144,20 +147,39 @@ classes are off by default for accuracy reasons (see above).
 ## Running the tests
 
 ```bash
+pip install -r requirements-dev.txt
 python3 -m playwright install chromium   # once, if needed
-python3 scripts/package.py               # rebuild index.html first
-python3 tests/run_all.py index.html
+pytest                                    # unit + browser tests
+pytest -m "not browser"                   # unit tests only, no browser/Chromium needed
+pytest -m browser                         # browser tests only
 ```
 
-Or run individual files:
+The browser tests package their own throwaway `index.html` via a pytest
+fixture (`tests/conftest.py`), so they never touch the repo's own
+`index.html` and don't need the sample videos (`ornek.mp4`/`ornek2.mp4`) to
+be present -- they exercise everything except actual video playback (see
+`TESTING_STRATEGY.md`). If Chromium isn't installed, `browser`-marked tests
+are skipped automatically with a clear reason instead of erroring.
+
+If Chromium lives somewhere other than Playwright's default install path
+(e.g. a sandboxed CI image), point at it with `PW_CHROMIUM_PATH`:
 
 ```bash
+PW_CHROMIUM_PATH=/opt/pw-browsers/chromium pytest -m browser
+```
+
+You can still run any file directly, the same way `tests/run_all.py` does:
+
+```bash
+python3 scripts/package.py               # rebuild index.html first
+python3 tests/run_all.py index.html      # legacy runner: everything against one built index.html
+
 python3 tests/unit/test_detection_geometry.py
 python3 tests/unit/test_pose_graph.py
 python3 tests/unit/test_package.py
 python3 tests/unit/test_causal_order.py
 
-python3 tests/check_pageerror.py index.html
+python3 tests/test_pageerror.py index.html
 python3 tests/test_tactical.py index.html
 python3 tests/test_zoom.py index.html
 python3 tests/test_stream_switch.py index.html

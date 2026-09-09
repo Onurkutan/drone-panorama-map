@@ -4,17 +4,20 @@ Exercises the tactical drawing layer (markers, lines, areas, freehand, text,
 measure, select/drag, delete, grid toggle, localStorage persistence) via
 Playwright mouse events.
 """
+import os
+import pathlib
 import sys
 from playwright.sync_api import sync_playwright
 
 def main(html_path):
     errors = []
+    console_errors = []
     with sync_playwright() as p:
-        browser = p.chromium.launch(executable_path='/opt/pw-browsers/chromium')
+        browser = p.chromium.launch(executable_path=os.environ.get("PW_CHROMIUM_PATH") or None)
         page = browser.new_page()
         page.on("pageerror", lambda exc: errors.append(str(exc)))
-        page.on("console", lambda msg: errors.append(f"console:{msg.type}:{msg.text}") if msg.type == "error" else None)
-        page.goto(f"file://{html_path}")
+        page.on("console", lambda msg: console_errors.append(msg) if msg.type == "error" else None)
+        page.goto(pathlib.Path(html_path).resolve().as_uri())
         page.wait_for_timeout(500)
         # freeze the auto-follow scroll so clicks land at stable coordinates
         page.evaluate("follow = false; document.getElementById('mosaicWrap').scrollLeft = 0; document.getElementById('mosaicWrap').scrollTop = 0;")
@@ -165,7 +168,26 @@ def main(html_path):
         page.wait_for_timeout(200)
         assert page.evaluate("tacticalItems.length") == 0
 
+        video_files = page.evaluate("STREAMS.map(s => s.video)")
         browser.close()
+
+    # The sample flight videos are gitignored and not present in CI or a
+    # fresh checkout, so Chromium logs a resource-load console error for
+    # each missing <video src="...">. That is expected here (see
+    # test_pageerror.py for the verified details) -- ignore only those,
+    # matched against the video filenames from STREAMS, and fail on
+    # anything else.
+    for msg in console_errors:
+        text = msg.text
+        loc_url = (msg.location or {}).get("url", "")
+        is_missing_video = (
+            ("ERR_FILE_NOT_FOUND" in text or "Failed to load resource" in text)
+            and any(loc_url.endswith(v) for v in video_files)
+        )
+        if is_missing_video:
+            print(f"IGNORED (sample video not present in this checkout): console:{msg.type}:{text} ({loc_url})")
+        else:
+            errors.append(f"console:{msg.type}:{text}")
 
     if errors:
         print("ERRORS:")
@@ -177,3 +199,11 @@ def main(html_path):
 
 if __name__ == "__main__":
     main(sys.argv[1])
+
+
+import pytest
+
+
+@pytest.mark.browser
+def test_tactical(html_path):
+    main(html_path)
