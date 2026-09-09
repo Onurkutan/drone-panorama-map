@@ -85,6 +85,16 @@ def main(html_path):
         assert page.evaluate("detEditMode") is True
         assert "On" in page.evaluate("document.getElementById('detEditBtn').textContent")
 
+        # The box sits thousands of mosaic px from the origin, well outside the
+        # viewport. Don't rely on the follow lerp having scrolled there by now
+        # (it advances per animation frame, so it is a timing race that lost
+        # on CI): freeze follow and scroll the box into the middle of the view
+        # deterministically, then click it.
+        page.evaluate(
+            "([x, y]) => { follow = false; const w = document.getElementById('mosaicWrap'); "
+            "w.scrollLeft = x * zoom - w.clientWidth / 2; w.scrollTop = y * zoom - w.clientHeight / 2; }",
+            [cx, cy])
+        page.wait_for_timeout(50)
         canvas = page.locator("#tacticalCanvas")
         box = canvas.bounding_box()
         ratio = page.evaluate(
